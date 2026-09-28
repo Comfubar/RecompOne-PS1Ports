@@ -25,7 +25,7 @@ public static unsafe class VirtualPads
         new("8bitdo", 0x2DC8, 0x6101, "8BitDo SN30 Pro", true),
         new("generic", 0x0079, 0x0006, "Generic USB Joystick", true),
         //a pad SDL has no mapping for: only a raw joystick, needs the raw fallback or "map this controller"
-        new("unmapped", 0x1209, 0x7E57, "Unmapped Test Pad", false)
+        new("unmapped", 0x1209, 0x7E57, "Unknown Test Pad", false)
     ];
 
     private sealed class Pad
@@ -40,6 +40,11 @@ public static unsafe class VirtualPads
     private static readonly Dictionary<string, Pad> _pads = new(StringComparer.OrdinalIgnoreCase);
 
     public static int Count => _pads.Count;
+
+    //test hook: a virtual pad attached with "bt" stands in for the same model over Bluetooth (its SDL bus type is
+    //"virtual", so the input layer is told by name)
+    public const string BluetoothSuffix = " (Bluetooth)";
+    public static bool IsSimulatedBluetooth(string name) => _pads.Count > 0 && name.EndsWith(BluetoothSuffix, StringComparison.Ordinal);
 
     public static Family? FindFamily(string key)
     {

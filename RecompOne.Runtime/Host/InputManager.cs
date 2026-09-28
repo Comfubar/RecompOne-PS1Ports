@@ -21,7 +21,8 @@ internal static unsafe class InputManager
     private static readonly nint[] _pads = new nint[GameConfig.MaxPlayers];
     private static GameController* Pad(int player) => (GameController*)_pads[player];
     private static readonly int[] _playerSlot = [0, 4, -1, -1];
-    private static readonly string[] _padIds = new string[GameConfig.MaxPlayers];
+    private static readonly string[] _padIds = ["", "", "", ""];
+    private static readonly bool[] _padLost = new bool[GameConfig.MaxPlayers];
 
     //pads found to be a second view of another pad (see Input.MirrorDetector), left alone until the program restarts
     private static readonly HashSet<string> _sessionIgnored = [];
@@ -227,8 +228,11 @@ internal static unsafe class InputManager
             slot.Analog = cfg.KindFor(p) == PadKind.Analog;
             var keys = p switch { 0 => cfg.Keys, 1 => cfg.Keys2, _ => null };
             if (_keyboard != null && keys != null) slot.Buttons = KeyState(_keyboard, keys);
-            //player 1 always has the keyboard, player 2 has it when keys are bound
-            slot.Connected = p == 0 || (keys != null && HasAnyKey(keys));
+            //a player whose keys are pressed takes the keyboard back after their pad was unplugged
+            if (slot.Buttons != 0xFFFF) _padLost[p] = false;
+            //player 1 always has the keyboard, player 2 has it when keys are bound; while a player's pad is unplugged
+            //the player counts as disconnected, so the game shows its own "controller removed" pause
+            slot.Connected = !_padLost[p] && (p == 0 || (keys != null && HasAnyKey(keys)));
 
             var pad = Pad(p);
             if (_sdl != null && pad != null)
@@ -261,7 +265,7 @@ internal static unsafe class InputManager
 
         if (tap != Controller.Multitap1)
             Console.WriteLine($"[Input] multitap in port 1: {(tap ? "yes" : "no")} ({cfg.Multitap}, {inUse} player(s))");
-        Controller.Multitap1 = tap;
+        Controller.SetMultitap1(tap);
         Controller.Multitap2 = false;
 
         //with a multitap players 1-4 are slots 1A-1D, without one player 1 is port 1 and player 2 port 2
@@ -528,7 +532,11 @@ internal static unsafe class InputManager
         };
     }
 
-    public static string PlayerConnection(int player) => _pads[player] == 0 ? "" : Connection(_padIds[player]);
+    public static string PlayerConnection(int player)
+    {
+        if (_pads[player] == 0) return "";
+        return Input.VirtualPads.IsSimulatedBluetooth(PadName(player)) ? "Bluetooth" : Connection(_padIds[player]);
+    }
 
     private static readonly bool VirtualOnly = Environment.GetEnvironmentVariable("RECOMPONE_VIRTUAL_PADS_ONLY") == "1";
 
@@ -570,7 +578,19 @@ internal static unsafe class InputManager
                 _pads[p] = (nint)OpenFor(found, "", used);
 
         for (var p = 0; p < _pads.Length; p++)
-            _padIds[p] = _pads[p] == 0 ? "" : IdOf(p);
+        {
+            var id = _pads[p] == 0 ? "" : IdOf(p);
+            //the pad this player had is gone (unplugged, not moved elsewhere by a rescan)
+            if (id.Length == 0 && _padIds[p] is { Length: > 0 } old && found.All(f => f.Id != old))
+            {
+                _padLost[p] = true;
+                Console.WriteLine($"[Input] P{p + 1}'s controller was unplugged");
+            }
+
+            if (id.Length > 0) _padLost[p] = false;
+            _padIds[p] = id;
+        }
+
         _mirrors.Reset();
 
         var summary = string.Join(", ", Enumerable.Range(0, _pads.Length).Select(p => _pads[p] == 0
@@ -745,6 +765,9 @@ internal static unsafe class InputManager
     //what each player's pad was last told to do, so SDL is only called on a change or to keep a running motor going
     private static readonly (ushort Low, ushort High, long At)[] _rumble = new (ushort, ushort, long)[GameConfig.MaxPlayers];
 
+    //what a player's pad was last told (SDL low/high frequency motor, 0-65535)
+    public static (ushort Low, ushort High) RumbleOf(int player) => (_rumble[player].Low, _rumble[player].High);
+
     //the motors of the DualShock in each player's slot go to that player's pad. A pad the game stopped polling is
     //treated as stopped, like a real DualShock, so a loading screen never leaves a motor running.
     private static void ApplyRumble()
@@ -757,13 +780,16 @@ internal static unsafe class InputManager
             if (_pads[p] == 0 || _playerSlot[p] < 0) continue;
             var ds = Controller.Pads[_playerSlot[p]];
             var live = now - ds.LastPollTicks < 250;
-            if (live && (ds.SmallMotor != 0 || ds.LargeMotor != 0) && !RumbleAllowed(p)) continue;
+            if (live && (ds.SmallLevel != 0 || ds.LargeLevel != 0) && !RumbleAllowed(p)) continue;
             var strength = Math.Clamp(cfg.VibrationStrength, 0f, 1f);
-            var low = cfg.Vibration && live ? (ushort)(ds.LargeMotor * 257 * strength) : (ushort)0;
-            var high = cfg.Vibration && live ? (ushort)(ds.SmallMotor * 257 * strength) : (ushort)0;
+            var low = cfg.Vibration && live ? (ushort)(ds.LargeLevel * 257 * strength) : (ushort)0;
+            var high = cfg.Vibration && live ? (ushort)(ds.SmallLevel * 257 * strength) : (ushort)0;
             var last = _rumble[p];
             var running = low != 0 || high != 0;
-            if (low == last.Low && high == last.High && (!running || now - last.At < 200)) continue;
+            //small changes of a running motor wait for the next renewal
+            var changed = Math.Abs(low - last.Low) > 2048 || Math.Abs(high - last.High) > 2048 ||
+                          (low == 0) != (last.Low == 0) || (high == 0) != (last.High == 0);
+            if (!changed && (!running || now - last.At < 200)) continue;
             //SDL stops the effect after the duration, it is renewed every 200 ms while a motor runs
             _sdl.GameControllerRumble(Pad(p), low, high, running ? 400u : 0u);
             _rumble[p] = (low, high, now);
@@ -778,7 +804,7 @@ internal static unsafe class InputManager
     {
         var type = _sdl!.GameControllerGetType(Pad(p));
         if (type is not (GameControllerType.PS4 or GameControllerType.PS5)) return true;
-        if (Connection(_padIds[p]) != "Bluetooth" || ConfigManager.Game.PlayStationBluetoothRumble) return true;
+        if (PlayerConnection(p) != "Bluetooth" || ConfigManager.Game.PlayStationBluetoothRumble) return true;
         if (!_rumbleHeldBack[p])
         {
             _rumbleHeldBack[p] = true;

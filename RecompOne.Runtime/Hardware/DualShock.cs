@@ -47,6 +47,7 @@ public sealed class DualShock(int slot)
         ConfigMode = false;
         Locked = false;
         Array.Fill(_map, (byte)0xFF);
+        _smallLevel = _largeLevel = 0;
         SetMotors(0, 0);
     }
 
@@ -69,12 +70,17 @@ public sealed class DualShock(int slot)
     private static readonly bool BytesTrace = Environment.GetEnvironmentVariable("RECOMPONE_PAD_BYTES") == "1";
     private readonly System.Text.StringBuilder _txBytes = new(), _rxBytes = new();
     private static int _bytesLines;
+    private string _lastMotorTx = "";
 
     private void FlushBytes()
     {
         if (!BytesTrace || _txBytes.Length == 0) return;
-        if ((_cmd != 0x42 || ConfigMode) && _bytesLines++ < 2000)
-            Console.WriteLine($"[PadBytes] {Controller.SlotName(Slot)} tx {_txBytes}| rx {_rxBytes}| config={ConfigMode} analog={AnalogMode}");
+        var tx = _txBytes.ToString();
+        //reads only when they carry motor data (anything but zeros after the first two bytes), and only when it changed
+        var motorData = _cmd == 0x42 && tx.Length > 6 && tx[6..].Replace("00", "").Trim().Length > 0;
+        if ((_cmd != 0x42 || ConfigMode || (motorData && tx != _lastMotorTx)) && _bytesLines++ < 2000)
+            Console.WriteLine($"[PadBytes] frame {Diagnostics.TestScript.Frame} {Controller.SlotName(Slot)} tx {tx}| rx {_rxBytes}| config={ConfigMode} analog={AnalogMode}");
+        if (_cmd == 0x42) _lastMotorTx = tx;
         _txBytes.Clear();
         _rxBytes.Clear();
     }
@@ -198,19 +204,33 @@ public sealed class DualShock(int slot)
         if (i == last) SetMotors(_pendingSmall, _pendingLarge);
     }
 
+    //games pulse the motors (this one sends 250 and 0 on alternate frames for a weaker rumble); the motor's own
+    //inertia smooths that on a real pad, here the level follows the commands with a ~100 ms time constant. The levels
+    //are what the host pad is given (InputManager.ApplyRumble).
+    private float _smallLevel, _largeLevel;
+    public byte SmallLevel => (byte)Math.Round(_smallLevel);
+    public byte LargeLevel => (byte)Math.Round(_largeLevel);
+    private bool _rumbling;
+
     private void SetMotors(byte small, byte large)
     {
-        if (small == SmallMotor && large == LargeMotor) return;
-        var wasOn = SmallMotor != 0 || LargeMotor != 0;
+        const float k = 0.3f; //per read, the game reads the pad about 30 times a second
+        _smallLevel += (small - _smallLevel) * k;
+        _largeLevel += (large - _largeLevel) * k;
+        if (small == 0 && _smallLevel < 4) _smallLevel = 0;
+        if (large == 0 && _largeLevel < 4) _largeLevel = 0;
+
+        if (small != SmallMotor || large != LargeMotor)
+            Input.InputTrace.Call("SIO0 DualShock", $"slot {Controller.SlotName(Slot)} motors", $"small {small} large {large}");
         SmallMotor = small;
         LargeMotor = large;
-        var on = small != 0 || large != 0;
-        Input.InputTrace.Call("SIO0 DualShock", $"slot {Controller.SlotName(Slot)} motors", $"small {small} large {large}");
-        if (on != wasOn || Environment.TickCount64 - _lastMotorLog > 1000)
-        {
-            _lastMotorLog = Environment.TickCount64;
-            Console.WriteLine($"[Pad] {Controller.SlotName(Slot)} motors small={small} large={large}");
-        }
+
+        var on = _smallLevel >= 4 || _largeLevel >= 4;
+        if (on == _rumbling) return;
+        _rumbling = on;
+        if (Environment.TickCount64 - _lastMotorLog < 1000 && on) return;
+        _lastMotorLog = Environment.TickCount64;
+        Console.WriteLine($"[Pad] {Controller.SlotName(Slot)} vibration {(on ? $"on (command small={small} large={large})" : "off")}");
     }
 
     private long _lastMotorLog;

@@ -103,6 +103,7 @@ public static class Interrupts
     [MethodImpl(MethodImplOptions.NoInlining)] //just making sure the stupid jit doenst fuck it up :D, it SHOULD be big enough now to not cause issues, but the previous one did
     private static void PollSlow(CpuContext cpu, IMemory mem)
     {
+        if (Diagnostics.Profiler.On) Diagnostics.Profiler.Sample();
         _countdown = PollInterval;
         TickVBlank();
         Runtime.Timers?.Poll(RaiseTimer);

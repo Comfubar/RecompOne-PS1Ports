@@ -142,8 +142,14 @@ public sealed class Sio0
         {
             _device = value;
             _step = 0;
+            //a port whose multitap was just put in or taken out is empty for a moment (Controller.SetMultitap1)
+            if (value is >= 0x01 and <= 0x04 &&
+                Environment.TickCount64 < ((_ctrl & CtrlPort2) != 0 ? Controller.Port2EmptyUntil : Controller.Port1EmptyUntil))
+                value = DeviceNone;
             //behind a multitap the address byte picks the slot: 01h-04h = pads A-D
-            if (value is >= 0x01 and <= 0x04)
+            if (value == DeviceNone)
+                _device = DeviceNone;
+            else if (value is >= 0x01 and <= 0x04)
             {
                 _tapAddress = value;
                 var tap = (_ctrl & CtrlPort2) != 0 ? Controller.Multitap2 : Controller.Multitap1;

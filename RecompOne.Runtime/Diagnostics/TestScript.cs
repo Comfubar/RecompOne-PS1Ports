@@ -35,7 +35,8 @@ namespace RecompOne.Runtime.Diagnostics;
 //frame (dumps/frames/fail_*.png) are logged and the process exits with code 3.
 //
 //RECOMPONE_SCRIPT_LIVE=<file>: lines appended to that file while the game runs are executed as they arrive (a line
-//may start with "+<n>s" to run n seconds from now); in live mode a failed wait is logged and the next line runs.
+//may start with "+<n>s" to run n seconds from now); in live mode a failed wait is logged and the next line runs,
+//"clear" drops everything queued.
 public static class TestScript
 {
     private sealed record Action(long Frame, double Seconds, string Verb, string[] Args, int Line);
@@ -71,7 +72,7 @@ public static class TestScript
     private static readonly string[] SequentialVerbs =
     [
         "step", "sleep", "wait", "capture", "press", "stick", "plug", "unplug", "key", "keydown", "keyup", "vpad",
-        "dump", "fps", "reset", "quit", "ramdump", "until"
+        "dump", "fps", "reset", "quit", "ramdump", "until", "profile"
     ];
 
     private static List<Action> Load()
@@ -159,6 +160,15 @@ public static class TestScript
             {
                 _steps.Enqueue(new Step($"sleep {parts[0][1..^1]}", ["sleep", parts[0][1..^1]], 0, true));
                 parts.RemoveAt(0);
+            }
+
+            if (parts[0].Equals("clear", StringComparison.OrdinalIgnoreCase))
+            {
+                //drops the queued steps and the running one (a live session that went off track)
+                Console.WriteLine($"[TestScript] live: cleared {_steps.Count + (_current != null ? 1 : 0)} step(s)");
+                _steps.Clear();
+                _current = null;
+                continue;
             }
 
             if (!SequentialVerbs.Contains(parts[0].ToLowerInvariant()))
@@ -327,6 +337,10 @@ public static class TestScript
                 return true;
             case "capture":
                 return Capture(s, p);
+            case "profile":
+                //prints the sampled call chains since the last "profile" (RECOMPONE_PROFILE=1) and starts over
+                Profiler.Report(p.Length > 1 ? int.Parse(p[1], CultureInfo.InvariantCulture) : 25);
+                return true;
             case "ramdump":
             {
                 //main RAM to <dumps>/ram_<name>.bin, for finding a game's variables by comparing dumps
@@ -491,6 +505,35 @@ public static class TestScript
                     : name.Contains(want, StringComparison.OrdinalIgnoreCase);
                 return (met, $"P{p + 1} has '{name}'");
             }
+            case "connection":
+            {
+                //connection <1-4> <USB|Bluetooth|virtual>, family <1-4> <text>: how the input layer sees a player's pad
+                var p = int.Parse(c[1], CultureInfo.InvariantCulture) - 1;
+                var conn = Host.InputManager.PlayerConnection(p);
+                return (conn.Equals(c[2], StringComparison.OrdinalIgnoreCase), $"P{p + 1} connection '{conn}'");
+            }
+            case "family":
+            {
+                var p = int.Parse(c[1], CultureInfo.InvariantCulture) - 1;
+                var fam = Host.InputManager.Family(p);
+                var want = string.Join(' ', c[2..]);
+                return (fam.Equals(want, StringComparison.OrdinalIgnoreCase), $"P{p + 1} family '{fam}'");
+            }
+            case "slot":
+            {
+                //slot <1-4> <1A..2D|none>: where the player's controller is plugged in the emulated console
+                var p = int.Parse(c[1], CultureInfo.InvariantCulture) - 1;
+                var slot = Host.InputManager.SlotOfPlayer(p);
+                var name = slot < 0 ? "none" : Hardware.Controller.SlotName(slot);
+                return (name.Equals(c[2], StringComparison.OrdinalIgnoreCase), $"P{p + 1} in slot {name}");
+            }
+            case "rumble":
+            {
+                //rumble <1-4> on|off: what the player's host pad was last told
+                var (low, high) = Host.InputManager.RumbleOf(int.Parse(c[1], CultureInfo.InvariantCulture) - 1);
+                var on = low != 0 || high != 0;
+                return (on == c[2].Equals("on", StringComparison.OrdinalIgnoreCase), $"P{c[1]} rumble low={low} high={high}");
+            }
             case "file":
             {
                 //file <path> changed: the file's content differs from when the step started (a save was written)
@@ -650,7 +693,7 @@ public static class TestScript
                 var fam = Input.VirtualPads.FindFamily(p[3]) ??
                           throw new FormatException($"unknown pad family '{p[3]}' (" +
                                                     string.Join(", ", Input.VirtualPads.Families.Select(f => f.Key)) + ")");
-                var suffix = p.Length > 4 && p[4].Equals("bt", StringComparison.OrdinalIgnoreCase) ? " (Bluetooth)" : "";
+                var suffix = p.Length > 4 && p[4].Equals("bt", StringComparison.OrdinalIgnoreCase) ? Input.VirtualPads.BluetoothSuffix : "";
                 Host.InputManager.RunOnInputThread(sdl =>
                     Input.VirtualPads.Attach(sdl ?? throw new InvalidOperationException("SDL is not available"), ids[0], fam, suffix));
                 return true;

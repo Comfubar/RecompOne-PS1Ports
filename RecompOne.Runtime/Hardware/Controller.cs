@@ -55,6 +55,17 @@ public static class Controller
     public static bool Multitap1;
     public static bool Multitap2;
 
+    //putting a multitap in or taking it out is a physical swap: the port is empty for a moment (the game's pad library
+    //only notices the new device after it saw the port empty). Until this tick count the port answers nothing.
+    public static long Port1EmptyUntil, Port2EmptyUntil;
+
+    public static void SetMultitap1(bool on)
+    {
+        if (on == Multitap1) return;
+        Multitap1 = on;
+        Port1EmptyUntil = Environment.TickCount64 + 250;
+    }
+
     //libpad port numbers: 0x00-0x03 = 1A-1D, 0x10-0x13 = 2A-2D
     public static int SlotFor(uint padPort)
     {
