@@ -142,6 +142,13 @@ public sealed class Sio0
         {
             _device = value;
             _step = 0;
+            //behind a multitap the address byte picks the slot: 01h-04h = pads A-D
+            if (value is >= 0x01 and <= 0x04)
+            {
+                _tapAddress = value;
+                var tap = (_ctrl & CtrlPort2) != 0 ? Controller.Multitap2 : Controller.Multitap1;
+                _device = tap || value == DevicePad ? DevicePad : DeviceNone;
+            }
         }
 
         byte rx = 0xFF;
@@ -332,7 +339,13 @@ public sealed class Sio0
     private static readonly Events.PadReadEvent _readEvent = new();
     private static int _unsupported;
     private bool _tapFrame;
-    private readonly byte[] _tapData = new byte[32];
+    private byte _tapAddress = 0x01;
+    private bool _tapInvalidCmd;
+    //per port: what the tap collected from its four pads during the previous multi-read; it answers with that while
+    //it collects the next one (the pads are read in parallel with the transfer to the console)
+    private readonly byte[][] _tapBuffer = [NewTapBuffer(), NewTapBuffer()];
+    private readonly Controller.PadSlot[] _lanePad = new Controller.PadSlot[4];
+    private readonly bool[] _laneDone = new bool[4];
     private const byte TapId = 0x80;
     private const int TapFrameEnd = 2 + 32;
 
@@ -343,58 +356,62 @@ public sealed class Sio0
         var baseSlot = port2 ? 4 : 0;
         var tap = port2 ? Controller.Multitap2 : Controller.Multitap1;
         var step = _step++;
+        if (tap) return TapTransfer(step, value, portIdx, baseSlot, out rx);
 
-        if (step == 0)
+        _tapMode[portIdx] = false;
+        if (step == 0) return Select(baseSlot, "SIO0 poll", out rx);
+        return PadStep(step, value, baseSlot, "SIO0 poll", out rx);
+    }
+
+    //the address byte: the pad answers when it is there
+    private bool Select(int slot, string trace, out byte rx)
+    {
+        _pad = Sample(slot);
+        if (_pad.Connected)
         {
-            _tapFrame = tap && _tapMode[portIdx];
-            if (!_tapFrame) _pad = Sample(baseSlot);
-            if (!_tapFrame && !_pad.Connected)
-            {
-                rx = 0xFF;
-                _step = 0;
-                _device = DeviceNone;
-                Input.InputTrace.Data("SIO0 poll", baseSlot, false, 0xFFFF);
-                return false;
-            }
-
             rx = 0xFF;
             return true;
         }
 
-        if (_tapFrame) return TapTransfer(step, value, portIdx, baseSlot, out rx);
+        Input.InputTrace.Data(trace, slot, false, 0xFFFF);
+        return End(out rx);
+    }
 
+    //one pad after its address byte: 42h reads it (digital: ID 41h, 5Ah, buttons; analog: ID 73h, 5Ah, buttons,
+    //sticks). A digital pad does not answer any other command, the transfer ends without an ack.
+    private bool PadStep(int step, byte value, int slot, string trace, out byte rx)
+    {
         var pad = _pad;
-        var buttons = pad.Buttons;
-        var analog = pad.Analog;
         switch (step)
         {
             case 1:
                 if (value != 0x42)
                 {
-                    Input.InputTrace.Call("SIO0 pad command", $"slot {Controller.SlotName(baseSlot)} cmd 0x{value:X2}", $"not supported (#{++_unsupported})");
-                    rx = 0xFF;
-                    _step = 0;
-                    return false;
+                    Input.InputTrace.Call("SIO0 pad command", $"slot {Controller.SlotName(slot)} cmd 0x{value:X2}",
+                        $"not supported, no ack (#{++_unsupported})");
+                    return End(out rx);
                 }
 
-                rx = analog ? (byte)0x73 : (byte)0x41;
+                rx = pad.Analog ? (byte)0x73 : (byte)0x41;
                 return true;
             case 2:
-                //the TAP byte: 01h asks a multitap for all four slots, from the next poll on
-                _tapMode[portIdx] = tap && value == 0x01;
                 rx = 0x5A;
                 return true;
             case 3:
-                rx = (byte)buttons;
+                rx = (byte)pad.Buttons;
                 return true;
             case 4:
-                rx = (byte)(buttons >> 8);
-                Input.InputTrace.Data("SIO0 poll", baseSlot, true, buttons);
-                if (analog) Input.InputTrace.Sticks("SIO0 poll", baseSlot, pad.LeftX, pad.LeftY, pad.RightX, pad.RightY);
-                if (analog) return true;
-                _step = 0;
-                _device = DeviceNone;
-                return false;
+                rx = (byte)(pad.Buttons >> 8);
+                Input.InputTrace.Data(trace, slot, true, pad.Buttons);
+                if (!pad.Analog)
+                {
+                    _step = 0;
+                    _device = DeviceNone;
+                    return false;
+                }
+
+                Input.InputTrace.Sticks(trace, slot, pad.LeftX, pad.LeftY, pad.RightX, pad.RightY);
+                return true;
             case 5:
                 rx = pad.RightX;
                 return true;
@@ -410,35 +427,58 @@ public sealed class Sio0
                 _device = DeviceNone;
                 return false;
             default:
-                rx = 0xFF;
-                _step = 0;
-                return false;
+                return End(out rx);
         }
     }
 
+    private bool End(out byte rx)
+    {
+        rx = 0xFF;
+        _step = 0;
+        _device = DeviceNone;
+        return false;
+    }
+
+    //a multitap (SCPH-1070) on the port. The third byte of every pad command (the "TAP" byte) queues the mode of the
+    //next transfer: bit 0 set = multi-read, where 01h 42h returns ID 80h, 5Ah and 4 x 8 bytes, one block per slot
+    //(FFh for an empty slot). Any other command in multi-read mode is still answered with 80h, 5Ah but the transfer
+    //stops there. Otherwise the address byte picks one slot and the bytes go to that pad unchanged.
     private bool TapTransfer(int step, byte value, int portIdx, int baseSlot, out byte rx)
     {
+        var slot = baseSlot + _tapAddress - 1;
         switch (step)
         {
+            case 0:
+                _tapFrame = _tapMode[portIdx];
+                return Select(slot, "SIO0 multitap address", out rx);
             case 1:
-                if (value != 0x42)
-                {
-                    Input.InputTrace.Call("SIO0 multitap command", $"port {portIdx + 1} cmd 0x{value:X2}", $"not supported (#{++_unsupported})");
-                    rx = 0xFF;
-                    _step = 0;
-                    return false;
-                }
-
+                if (!_tapFrame) return PadStep(step, value, slot, "SIO0 multitap single", out rx);
+                _tapInvalidCmd = value != 0x42;
+                if (_tapInvalidCmd)
+                    Input.InputTrace.Call("SIO0 multitap command", $"port {portIdx + 1} cmd 0x{value:X2}",
+                        $"multi-read skipped (#{++_unsupported})");
                 rx = TapId;
                 return true;
             case 2:
-                _tapMode[portIdx] = value == 0x01;
-                FillTapData(baseSlot);
+                _tapMode[portIdx] = (value & 0x01) != 0;
+                if (!_tapFrame) return PadStep(step, value, slot, "SIO0 multitap single", out rx);
+                if (_tapInvalidCmd)
+                {
+                    End(out _);
+                    rx = 0x5A;
+                    return false;
+                }
+
+                StartLanes(baseSlot);
                 rx = 0x5A;
                 return true;
         }
 
-        rx = _tapData[step - 3];
+        if (!_tapFrame) return PadStep(step, value, slot, "SIO0 multitap single", out rx);
+        var i = step - 3;
+        var buffer = _tapBuffer[portIdx];
+        rx = buffer[i];
+        buffer[i] = LaneReply(i / 8, i % 8, value, baseSlot);
         if (step < TapFrameEnd) return true;
         _step = 0;
         _device = DeviceNone;
@@ -461,29 +501,57 @@ public sealed class Sio0
         return p;
     }
 
-    private void FillTapData(int baseSlot)
+    private static byte[] NewTapBuffer()
+    {
+        var b = new byte[32];
+        Array.Fill(b, (byte)0xFF);
+        return b;
+    }
+
+    //a multi-read starts: every pad behind the tap was addressed and waits for its command
+    private void StartLanes(int baseSlot)
     {
         for (var i = 0; i < 4; i++)
         {
             var p = Sample(baseSlot + i);
-            var o = i * 8;
+            _lanePad[i] = p;
+            _laneDone[i] = !p.Connected;
             Input.InputTrace.Data("SIO0 multitap poll", baseSlot + i, p.Connected, p.Buttons);
             if (p.Connected && p.Analog)
                 Input.InputTrace.Sticks("SIO0 multitap poll", baseSlot + i, p.LeftX, p.LeftY, p.RightX, p.RightY);
-            if (!p.Connected)
-            {
-                for (var k = 0; k < 8; k++) _tapData[o + k] = 0xFF;
-                continue;
-            }
+        }
+    }
 
-            _tapData[o + 0] = p.Analog ? (byte)0x73 : (byte)0x41;
-            _tapData[o + 1] = 0x5A;
-            _tapData[o + 2] = (byte)p.Buttons;
-            _tapData[o + 3] = (byte)(p.Buttons >> 8);
-            _tapData[o + 4] = p.Analog ? p.RightX : (byte)0xFF;
-            _tapData[o + 5] = p.Analog ? p.RightY : (byte)0xFF;
-            _tapData[o + 6] = p.Analog ? p.LeftX : (byte)0xFF;
-            _tapData[o + 7] = p.Analog ? p.LeftY : (byte)0xFF;
+    //the byte a pad sends back for byte <pos> of its 8 byte lane; the first byte of a lane is that pad's command.
+    //A pad that has finished (or does not know the command, or is not there) sends FFh for the rest of its lane.
+    private byte LaneReply(int lane, int pos, byte value, int baseSlot)
+    {
+        if (_laneDone[lane]) return 0xFF;
+        var p = _lanePad[lane];
+        switch (pos)
+        {
+            case 0:
+                if (value == 0x42) return p.Analog ? (byte)0x73 : (byte)0x41;
+                Input.InputTrace.Call("SIO0 multitap lane", $"slot {Controller.SlotName(baseSlot + lane)} cmd 0x{value:X2}",
+                    $"not supported, FFh (#{++_unsupported})");
+                _laneDone[lane] = true;
+                return 0xFF;
+            case 1:
+                return 0x5A;
+            case 2:
+                return (byte)p.Buttons;
+            case 3:
+                if (!p.Analog) _laneDone[lane] = true;
+                return (byte)(p.Buttons >> 8);
+            case 4:
+                return p.RightX;
+            case 5:
+                return p.RightY;
+            case 6:
+                return p.LeftX;
+            default:
+                _laneDone[lane] = true;
+                return p.LeftY;
         }
     }
 }

@@ -646,7 +646,7 @@ public static class HostWindow
         Memory.RamLogger.TrackReads =
             PanelManager.Get<RamMapPanel>()?.IsOpen == true ||
             PanelManager.Get<MemoryEditorPanel>()?.IsOpen == true;
-        Memory.RamLogger.TrackWrites = Memory.RamLogger.TrackReads;
+        Memory.RamLogger.TrackWrites = Memory.RamLogger.TrackReads || Diagnostics.WriteWatch.Enabled;
 
         var gpu = _gpu;
         if (gpu != null)

@@ -13,7 +13,7 @@ public sealed class RamLogger
     private uint _cycle;
 
     public static bool TrackReads;
-    public static bool TrackWrites;
+    public static bool TrackWrites = Diagnostics.WriteWatch.Enabled;
 
     public float DecayFrames = 90f;
     public Vector4 BackdropColor = new(0.25f, 0.15f, 0.15f, 1f);
@@ -60,6 +60,7 @@ public sealed class RamLogger
 
     public void RecordWrite(uint physAddr, int bytes)
     {
+        if (Diagnostics.WriteWatch.Enabled) Diagnostics.WriteWatch.Check(physAddr, bytes);
         for (var i = 0; i < bytes; i++)
         {
             var idx = (int)((physAddr + (uint)i) & 0x1FFFFF);
