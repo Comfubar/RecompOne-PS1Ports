@@ -31,6 +31,21 @@ public sealed class RecompOneConfig
     } //linear sweep is to find functions when the elf doesnt ptovide then properly (fuck you sh) this can and WILL get some data as code, use it by your own risk
 
     [JsonPropertyName("debug")] public bool Debug { get; set; }
+
+    //emit every image (main, each overlay) as its own class library project under the output folder, so no single
+    //compile has to hold all of the generated code (see ProjectLayoutWriter)
+    [JsonPropertyName("splitProjects")] public bool SplitProjects { get; set; }
+
+    //false: the dispatch tables do not carry the game's code bytes (used by the stale code check), they name where
+    //on the disc the bytes are and the runtime reads them from the player's own disc at startup
+    [JsonPropertyName("embedImages")] public bool EmbedImages { get; set; } = true;
+
+    //RecompOne.Runtime.csproj, relative to the config file, referenced by the split projects
+    [JsonPropertyName("runtimeProject")] public string? RuntimeProject { get; set; }
+
+    //command line -sources-only: the split layout without project files, every folder holds all of its sources
+    //(Common gets a copy of the port's patches), for a tool that compiles them itself
+    [JsonIgnore] public bool SourcesOnly { get; set; }
     [JsonPropertyName("addressComments")] public bool AddressComments { get; set; }
     [JsonPropertyName("disasmComments")] public bool DisasmComments { get; set; }
     [JsonPropertyName("overlays")] public OverlayConfig[] Overlays { get; set; } = [];
@@ -158,6 +173,13 @@ public sealed class OverlayConfig
     [JsonPropertyName("funcMap")] public string? FuncMap { get; set; }
     [JsonPropertyName("base")] public string? Base { get; set; }
     [JsonPropertyName("file")] public string? File { get; set; }
+
+    //a file on the host instead of the disc (for example an exe image dumped from ram), relative to the config
+    [JsonPropertyName("localFile")] public string? LocalFile { get; set; }
+
+    //the source is an archive, the overlay is one of its entries (see Psx/Compression/Dpac.cs)
+    [JsonPropertyName("archive")] public string? Archive { get; set; }
+    [JsonPropertyName("entry")] public int Entry { get; set; } = -1;
     [JsonPropertyName("offset")] public int Offset { get; set; } = 0;
     [JsonPropertyName("skip")] public int Skip { get; set; } = 0;
     [JsonPropertyName("lba")] public int Lba { get; set; } = -1;

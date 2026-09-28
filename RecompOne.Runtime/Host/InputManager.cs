@@ -17,8 +17,15 @@ internal static unsafe class InputManager
     private static IKeyboard? _keyboard;
     private static IMouse? _mouse;
     private static Sdl? _sdl;
-    private static GameController* _pad0;
-    private static GameController* _pad1;
+    //one SDL controller per player (0: no pad for that player)
+    private static readonly nint[] _pads = new nint[GameConfig.MaxPlayers];
+    private static GameController* Pad(int player) => (GameController*)_pads[player];
+    private static readonly int[] _playerSlot = [0, 4, -1, -1];
+    private static readonly string[] _padIds = new string[GameConfig.MaxPlayers];
+
+    //pads found to be a second view of another pad (see Input.MirrorDetector), left alone until the program restarts
+    private static readonly HashSet<string> _sessionIgnored = [];
+    private static readonly Input.MirrorDetector _mirrors = new(GameConfig.MaxPlayers);
 
     private const int AxisThreshold = 8000;
     private const int StickThreshold = 16000;
@@ -73,6 +80,9 @@ internal static unsafe class InputManager
         {
             _sdl = Sdl.GetApi();
             _sdl.SetHint("SDL_JOYSTICK_RAWINPUT", "0");
+            //bind by position, not by printed label, so south is Cross on every pad (SDL swaps A/B on Nintendo pads
+            //by default)
+            _sdl.SetHint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
             _sdl.InitSubSystem(Sdl.InitGamecontroller);
             Rescan();
         }
@@ -82,11 +92,11 @@ internal static unsafe class InputManager
         }
     }
 
-    public static bool IsConnected => _pad0 != null;
+    public static bool IsConnected => _pads[0] != 0;
 
-    public static bool IsPadConnected(int pad)
+    public static bool IsPadConnected(int player)
     {
-        return pad == 0 ? _pad0 != null : _pad1 != null;
+        return player >= 0 && player < _pads.Length && _pads[player] != 0;
     }
 
     public static bool IsKeyDown(Key k)
@@ -96,19 +106,125 @@ internal static unsafe class InputManager
 
     public static void Poll()
     {
-        Controller.Analog = ConfigManager.Game.PadKind == PadKind.Analog;
-        Controller.Analog2 = ConfigManager.Game.PadKind2 == PadKind.Analog;
-
-
         PollGamepadEvents();
-        PollKeyboard();
-        PollGamepads();
-        Controller.Connected2 = _pad1 != null || HasAnyKey(ConfigManager.Game.Keys2);
+        CheckMirrors();
+
+        var cfg = ConfigManager.Game;
+        var players = new Controller.PadSlot[GameConfig.MaxPlayers];
+        for (var p = 0; p < players.Length; p++)
+        {
+            var slot = Controller.EmptySlot;
+            slot.Analog = cfg.KindFor(p) == PadKind.Analog;
+            var keys = p switch { 0 => cfg.Keys, 1 => cfg.Keys2, _ => null };
+            if (_keyboard != null && keys != null) slot.Buttons = KeyState(_keyboard, keys);
+            //player 1 always has the keyboard, player 2 has it when keys are bound
+            slot.Connected = p == 0 || (keys != null && HasAnyKey(keys));
+
+            var pad = Pad(p);
+            if (_sdl != null && pad != null)
+            {
+                var bind = cfg.PadFor(p);
+                slot.Buttons = PadState(pad, bind, slot.Buttons);
+                slot.LeftX = Axis(pad, bind.LeftStickX);
+                slot.LeftY = Axis(pad, bind.LeftStickY);
+                slot.RightX = Axis(pad, bind.RightStickX);
+                slot.RightY = Axis(pad, bind.RightStickY);
+                slot.Connected = true;
+            }
+
+            players[p] = slot;
+        }
+
+        //scripted test pads plugged straight into a tap slot count as players too
+        var inUse = 0;
+        for (var p = 0; p < players.Length; p++)
+            if (players[p].Connected) inUse = p + 1;
+        for (var i = 1; i < 4; i++)
+            if (Input.ScriptedInput.IsPlugged(i)) inUse = Math.Max(inUse, i + 1);
+
+        var tap = cfg.Multitap switch
+        {
+            MultitapMode.On => true,
+            MultitapMode.Off => false,
+            _ => inUse > 2
+        };
+
+        if (tap != Controller.Multitap1)
+            Console.WriteLine($"[Input] multitap in port 1: {(tap ? "yes" : "no")} ({cfg.Multitap}, {inUse} player(s))");
+        Controller.Multitap1 = tap;
+        Controller.Multitap2 = false;
+
+        //with a multitap players 1-4 are slots 1A-1D, without one player 1 is port 1 and player 2 port 2
+        for (var p = 0; p < players.Length; p++)
+            _playerSlot[p] = tap ? p : p switch { 0 => 0, 1 => 4, _ => -1 };
+
+        var slots = new Controller.PadSlot[Controller.SlotCount];
+        for (var i = 0; i < slots.Length; i++) slots[i] = Controller.EmptySlot;
+        for (var p = 0; p < players.Length; p++)
+            if (_playerSlot[p] >= 0) slots[_playerSlot[p]] = players[p];
+            else if (players[p].Connected) WarnNoSlot(p);
+        Array.Copy(slots, Controller.Slots, slots.Length);
+
+        //the paths that only know two pads see slots 1A and 2A
+        Controller.State = slots[0].Buttons;
+        Controller.Analog = slots[0].Analog;
+        Controller.LeftX = slots[0].LeftX;
+        Controller.LeftY = slots[0].LeftY;
+        Controller.RightX = slots[0].RightX;
+        Controller.RightY = slots[0].RightY;
+        Controller.State2 = slots[4].Buttons;
+        Controller.Connected2 = slots[4].Connected;
+        Controller.Analog2 = slots[4].Analog;
+        Controller.LeftX2 = slots[4].LeftX;
+        Controller.LeftY2 = slots[4].LeftY;
+        Controller.RightX2 = slots[4].RightX;
+        Controller.RightY2 = slots[4].RightY;
+    }
+
+    private static void CheckMirrors()
+    {
+        if (_sdl == null) return;
+        var masks = new uint[_pads.Length];
+        var open = new bool[_pads.Length];
+        for (var p = 0; p < _pads.Length; p++)
+        {
+            if (_pads[p] == 0) continue;
+            open[p] = true;
+            for (var b = 0; b < (int)GameControllerButton.Max; b++)
+                if (_sdl.GameControllerGetButton(Pad(p), (GameControllerButton)b) != 0)
+                    masks[p] |= 1u << b;
+        }
+
+        var mirror = _mirrors.Observe(masks, open);
+        if (mirror < 0) return;
+
+        var twin = Array.FindIndex(open, o => o);
+        Console.WriteLine($"[Input] P{mirror + 1} '{PadName(mirror)}' mirrors P{twin + 1} '{PadName(twin)}': the same pad is " +
+                          "visible twice (a pad remapper such as DualSenseX or DS4Windows). Ignoring it for this session; " +
+                          "add it to IgnoredPads (Settings > Input > Ignore this controller) to make that permanent.");
+        _sessionIgnored.Add(_padIds[mirror]);
+        Rescan();
+    }
+
+    private static readonly bool[] _warnedNoSlot = new bool[GameConfig.MaxPlayers];
+
+    private static void WarnNoSlot(int player)
+    {
+        if (_warnedNoSlot[player]) return;
+        _warnedNoSlot[player] = true;
+        Console.WriteLine($"[Input] player {player + 1} has a controller but there is no port for it without a multitap " +
+                          "(Multitap is Off in the settings)");
+    }
+
+    //which slot a player's controller is in (-1: none)
+    public static int SlotOfPlayer(int player)
+    {
+        return player >= 0 && player < _playerSlot.Length ? _playerSlot[player] : -1;
     }
 
     public static int? GetFirstPressedPadButton(int pad = 0)
     {
-        var ctrl = pad == 0 ? _pad0 : _pad1;
+        var ctrl = pad >= 0 && pad < _pads.Length ? Pad(pad) : null;
         if (_sdl == null || ctrl == null) return null;
         for (var b = 0; b < (int)GameControllerButton.Max; b++)
             if (_sdl.GameControllerGetButton(ctrl, (GameControllerButton)b) != 0)
@@ -181,16 +297,11 @@ internal static unsafe class InputManager
 
     private static void CloseControllers()
     {
-        if (_pad0 != null)
+        for (var p = 0; p < _pads.Length; p++)
         {
-            _sdl?.GameControllerClose(_pad0);
-            _pad0 = null;
-        }
-
-        if (_pad1 != null)
-        {
-            _sdl?.GameControllerClose(_pad1);
-            _pad1 = null;
+            if (_pads[p] == 0) continue;
+            _sdl?.GameControllerClose(Pad(p));
+            _pads[p] = 0;
         }
     }
 
@@ -245,7 +356,14 @@ internal static unsafe class InputManager
         for (var i = 0; i < n; i++)
         {
             if (_sdl.IsGameController(i) != SdlBool.True) continue;
-            found.Add((i, DeviceId(i), DeviceName(i)));
+            var id = DeviceId(i);
+            var name = DeviceName(i);
+            if (_sessionIgnored.Contains(id)) continue;
+            if (ConfigManager.Game.IgnoredPads.Any(x => x.Length > 0 &&
+                    (string.Equals(x, id, StringComparison.OrdinalIgnoreCase) ||
+                     name.Contains(x, StringComparison.OrdinalIgnoreCase))))
+                continue;
+            found.Add((i, id, name));
         }
 
         lock (_devices)
@@ -254,9 +372,46 @@ internal static unsafe class InputManager
             foreach (var f in found) _devices.Add(new PadDevice(f.Id, f.Name));
         }
 
+        //players with a chosen device first, then the others take the remaining pads in order
         var used = new HashSet<int>();
-        _pad0 = OpenFor(found, ConfigManager.Game.PadDevice, used);
-        _pad1 = OpenFor(found, ConfigManager.Game.PadDevice2, used);
+        for (var p = 0; p < _pads.Length; p++)
+            if (!string.IsNullOrEmpty(ConfigManager.Game.DeviceFor(p)))
+                _pads[p] = (nint)OpenFor(found, ConfigManager.Game.DeviceFor(p), used);
+        for (var p = 0; p < _pads.Length; p++)
+            if (string.IsNullOrEmpty(ConfigManager.Game.DeviceFor(p)))
+                _pads[p] = (nint)OpenFor(found, "", used);
+
+        for (var p = 0; p < _pads.Length; p++)
+            _padIds[p] = _pads[p] == 0 ? "" : IdOf(p);
+        _mirrors.Reset();
+
+        var summary = string.Join(", ", Enumerable.Range(0, _pads.Length).Select(p => $"P{p + 1}={PadName(p)}"));
+        Console.WriteLine($"[Input] controllers: {found.Count} usable, {summary}");
+    }
+
+    private static string IdOf(int player)
+    {
+        if (_sdl == null || _pads[player] == 0) return "";
+        var joystick = _sdl.GameControllerGetJoystick(Pad(player));
+        var guid = _sdl.JoystickGetGUID(joystick);
+        var text = new byte[33];
+        fixed (byte* t = text) _sdl.JoystickGetGUIDString(guid, t, text.Length);
+        var len = Array.IndexOf(text, (byte)0);
+        return System.Text.Encoding.ASCII.GetString(text, 0, len < 0 ? text.Length : len);
+    }
+
+    //the SDL name of the pad a player has, "" when none
+    public static string PlayerDeviceName(int player)
+    {
+        var n = PadName(player);
+        return n == "-" ? "" : n;
+    }
+
+    private static string PadName(int player)
+    {
+        if (_sdl == null || _pads[player] == 0) return "-";
+        var name = _sdl.GameControllerNameS(Pad(player));
+        return string.IsNullOrWhiteSpace(name) ? "pad" : name;
     }
 
     private static GameController* OpenFor(List<(int Index, string Id, string Name)> found, string wanted,
@@ -291,20 +446,6 @@ internal static unsafe class InputManager
         var ctrl = _sdl.GameControllerOpen(pick);
         if (ctrl == null) used.Remove(pick);
         return ctrl;
-    }
-
-    private static void PollKeyboard()
-    {
-        var kb = _keyboard;
-        if (kb == null)
-        {
-            Controller.State = 0xFFFF;
-            Controller.State2 = 0xFFFF;
-            return;
-        }
-
-        Controller.State = KeyState(kb, ConfigManager.Game.Keys);
-        Controller.State2 = KeyState(kb, ConfigManager.Game.Keys2);
     }
 
     private static ushort KeyState(IKeyboard kb, KeyBindings cfg)
@@ -345,40 +486,13 @@ internal static unsafe class InputManager
                cfg.Up.Length > 0 || cfg.Down.Length > 0 || cfg.Left.Length > 0 || cfg.Right.Length > 0;
     }
 
-    private static void PollGamepads()
-    {
-        if (_sdl == null) return;
-
-        if (_pad0 != null)
-        {
-            var bind = ConfigManager.Game.PadFor(0);
-            Controller.State = PadState(_pad0, bind, Controller.State);
-            Controller.LeftX = Axis(_pad0, bind.LeftStickX);
-            Controller.LeftY = Axis(_pad0, bind.LeftStickY);
-            Controller.RightX = Axis(_pad0, bind.RightStickX);
-            Controller.RightY = Axis(_pad0, bind.RightStickY);
-        }
-
-        if (_pad1 != null)
-        {
-            var bind = ConfigManager.Game.PadFor(1);
-            Controller.State2 = PadState(_pad1, bind, Controller.State2);
-            Controller.LeftX2 = Axis(_pad1, bind.LeftStickX);
-            Controller.LeftY2 = Axis(_pad1, bind.LeftStickY);
-            Controller.RightX2 = Axis(_pad1, bind.RightStickX);
-            Controller.RightY2 = Axis(_pad1, bind.RightStickY);
-        }
-        else
-        {
-            Controller.LeftX2 = Controller.LeftY2 = Controller.RightX2 = Controller.RightY2 = 0x80;
-        }
-    }
-
     private static byte Axis(GameController* ctrl, int index)
     {
         if (_sdl == null || index < 0) return 0x80;
         return AxisToByte(_sdl.GameControllerGetAxis(ctrl, (GameControllerAxis)index));
     }
+
+    private static float Deadzone => Math.Clamp(ConfigManager.Game.StickDeadzone, 0f, 0.9f);
 
     private static ushort PadState(GameController* ctrl, GamepadBindings pad, ushort s)
     {
@@ -420,7 +534,8 @@ internal static unsafe class InputManager
         {
             var (axis, positive) = AxisBinding(binding);
             var v = _sdl.GameControllerGetAxis(ctrl, axis);
-            return positive ? v > StickThreshold : v < -StickThreshold;
+            var threshold = Math.Max(StickThreshold, (int)(Deadzone * 32767));
+            return positive ? v > threshold : v < -threshold;
         }
 
         return _sdl.GameControllerGetButton(ctrl, (GameControllerButton)binding) != 0;
@@ -428,17 +543,22 @@ internal static unsafe class InputManager
 
     private static byte AxisToByte(short axis)
     {
-        var f = Math.Clamp(axis * 1.3f / 32768.0f, -1.0f, 1.0f);
+        //inside the deadzone is centre, outside it is rescaled so the full range is still reachable
+        var raw = axis / 32768.0f;
+        var dz = Deadzone;
+        var mag = Math.Abs(raw);
+        raw = mag <= dz ? 0f : Math.Sign(raw) * (mag - dz) / (1f - dz);
+        var f = Math.Clamp(raw * 1.3f, -1.0f, 1.0f);
         return (byte)Math.Clamp((int)MathF.Round((f + 1.0f) * 127.5f), 0, 255);
     }
 
     public static void SetRumble(byte large, byte small)
     {
-        if (_sdl == null || _pad0 == null) return;
+        if (_sdl == null || _pads[0] == 0) return;
         var lo = (ushort)(large * 257);
         var hi = small != 0 ? (ushort)65535 : (ushort)0;
         var duration = large == 0 && small == 0 ? 0u : 500u;
-        _sdl.GameControllerRumble(_pad0, lo, hi, duration);
+        _sdl.GameControllerRumble(Pad(0), lo, hi, duration);
     }
 
     private static void OnKeyDown(IKeyboard kb, Key key, int _)

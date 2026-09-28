@@ -560,6 +560,7 @@ public sealed class GlCore : IGpuBackend
 
     public void DrawTri(in HleVertex a, in HleVertex b, in HleVertex c, in PrimFlags f)
     {
+        FrameDiagnostics.CountTri();
         ResolveReplacement(f,
             (int)Math.Min(a.U, Math.Min(b.U, c.U)), (int)Math.Min(a.V, Math.Min(b.V, c.V)),
             (int)Math.Max(a.U, Math.Max(b.U, c.U)), (int)Math.Max(a.V, Math.Max(b.V, c.V)));
@@ -572,6 +573,7 @@ public sealed class GlCore : IGpuBackend
 
     public void DrawRect(in HleRect r, in PrimFlags f)
     {
+        FrameDiagnostics.CountRect();
         ResolveReplacement(f, r.U, r.V, r.U + Math.Max(0, r.W - 1), r.V + Math.Max(0, r.H - 1));
         Begin(f, 6);
         var a = new HleVertex { X = r.X, Y = r.Y, R = r.R, G = r.G, B = r.B, U = r.U, V = r.V };
@@ -589,6 +591,7 @@ public sealed class GlCore : IGpuBackend
 
     public void DrawLine(in HleVertex a, in HleVertex b, in PrimFlags f)
     {
+        FrameDiagnostics.CountLine();
         _pendingRepTex = 0;
         _pendingRepClut = 0;
         Begin(f, 6);
@@ -642,6 +645,7 @@ public sealed class GlCore : IGpuBackend
 
     public void FillRect(int x, int y, int w, int h, ushort color15)
     {
+        FrameDiagnostics.CountFill();
         Flush();
         _vram.Fill(x, y, w, h, color15);
         foreach (var rt in _rts)
@@ -693,6 +697,7 @@ public sealed class GlCore : IGpuBackend
 
     public void CopyVram(int sx, int sy, int dx, int dy, int w, int h)
     {
+        FrameDiagnostics.CountCopy();
         Flush();
         WritebackDirtyIntersecting(sx, sy, w, h);
         _vram.CopyRect(sx, sy, dx, dy, w, h);
@@ -701,6 +706,7 @@ public sealed class GlCore : IGpuBackend
 
     public void WriteVram(int x, int y, int w, int h, ReadOnlySpan<ushort> px)
     {
+        FrameDiagnostics.CountUpload();
         Flush();
         _vram.WriteRect(x, y, w, h, px);
         SyncRtsFromVram(x, y, w, h);
@@ -973,6 +979,14 @@ public sealed class GlCore : IGpuBackend
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, rt.Fbo);
             _gl.Viewport(0, 0, (uint)rt.TexW, (uint)rt.TexH);
         }
+    }
+
+    //see FrameDiagnostics, called once per host frame whether or not the game shows anything
+    public void RunFrameDiagnostics(int dispX, int dispY, int w, int h, bool rgb24, bool displayOn, bool hle)
+    {
+        if (!Ready || !FrameDiagnostics.Enabled) return;
+        Flush();
+        FrameDiagnostics.OnHostFrame(_vram, dispX, dispY, w, h, rgb24, displayOn, hle);
     }
 
     public void Present(in HleDispEnv disp)

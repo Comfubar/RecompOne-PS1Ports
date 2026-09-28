@@ -285,7 +285,7 @@ public static class HostWindow
         }
         catch (Exception e)
         {
-            Console.WriteLine(e.Message);
+            Diagnostics.CrashReporter.ReportError(e, "window event pump (DoEvents)");
         }
 
         if (_window.IsClosing)
@@ -324,7 +324,7 @@ public static class HostWindow
         }
         catch (Exception e)
         {
-            Console.WriteLine(e.Message);
+            Diagnostics.CrashReporter.ReportError(e, "window event pump (DoEvents)");
         }
         
         if (_window.IsClosing)
@@ -358,8 +358,9 @@ public static class HostWindow
         {
             _window.DoRender();
         }
-        catch (NotImplementedException) //doesnt fucking work
+        catch (NotImplementedException e) //Silk.NET's ImGuiController.RenderImDrawData throws this for draw data it does not support
         {
+            Diagnostics.CrashReporter.ReportError(e, "window render (DoRender)");
         }
         
         if (counts) FrameClock.MarkPresent();
@@ -372,8 +373,9 @@ public static class HostWindow
         {
             _window.DoEvents();
         }
-        catch
+        catch (Exception e)
         {
+            Diagnostics.CrashReporter.ReportError(e, "window event pump (DoEvents)");
         }
 
         if (_window.IsClosing)
@@ -493,11 +495,12 @@ public static class HostWindow
         _glBackend = (Hle.GlCore)Hle.GpuBackendFactory.Create(_gl,
             Hle.GpuBackendFactory.Parse(ConfigManager.View.GpuBackend));
         _glBackend.InitGl();
+        Hle.FrameDiagnostics.Announce();
         Hle.GpuHle.Active = _glBackend.Ready;
         Hle.GpuHle.Backend = new Interp.InterpBackend(_glBackend);
         ApplySwapInterval();
 
-        _imgui = new ImGuiController(_gl, _window, input, null, ConfigureImGui);
+        _imgui = new ImGuiController(_gl, _window, new ImGuiInputFilter(input), null, ConfigureImGui);
 
         PanelManager.Register(new OutputPanel());
         PanelManager.Register(new VramViewerPanel());
@@ -648,6 +651,9 @@ public static class HostWindow
         var gpu = _gpu;
         if (gpu != null)
         {
+            _glBackend?.RunFrameDiagnostics(gpu.DisplayX, gpu.DisplayY, gpu.DisplayWidth, gpu.DisplayHeight,
+                gpu.Display24Bit, gpu.DisplayEnabled, Hle.GpuHle.Active);
+
             if (Hle.GpuHle.Active && _glBackend is { Ready: true } && gpu.DisplayEnabled)
             {
                 var wf = _window!.FramebufferSize;

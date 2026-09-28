@@ -22,6 +22,7 @@ public static class Controller
     public static bool Analog;
     public static bool Analog2;
 
+    //port 1 (first pad, or multitap slot 1A) and port 2 (2A), kept for the paths that only know two pads
     public static ushort State = 0xFFFF;
     public static byte RightX = 0x80;
     public static byte RightY = 0x80;
@@ -34,4 +35,48 @@ public static class Controller
     public static byte RightY2 = 0x80;
     public static byte LeftX2 = 0x80;
     public static byte LeftY2 = 0x80;
+
+    public struct PadSlot
+    {
+        public bool Connected;
+        public bool Analog;
+        public ushort Buttons; //active low, 0xFFFF = nothing pressed
+        public byte RightX, RightY, LeftX, LeftY;
+    }
+
+    //every place a pad can sit: 0-3 = port 1 slots A-D (B-D only exist with a multitap), 4-7 = port 2 slots A-D
+    public const int SlotCount = 8;
+    public static readonly PadSlot[] Slots = NewSlots();
+
+    //a multitap is plugged into port 1 / port 2
+    public static bool Multitap1;
+    public static bool Multitap2;
+
+    //libpad port numbers: 0x00-0x03 = 1A-1D, 0x10-0x13 = 2A-2D
+    public static int SlotFor(uint padPort)
+    {
+        return ((padPort & 0x10u) != 0 ? 4 : 0) + (int)(padPort & 3u);
+    }
+
+    public static string SlotName(int slot)
+    {
+        return $"{(slot < 4 ? 1 : 2)}{(char)('A' + (slot & 3))}";
+    }
+
+    public static PadSlot EmptySlot => new() { Buttons = 0xFFFF, RightX = 0x80, RightY = 0x80, LeftX = 0x80, LeftY = 0x80 };
+
+    private static PadSlot[] NewSlots()
+    {
+        var s = new PadSlot[SlotCount];
+        for (var i = 0; i < SlotCount; i++) s[i] = EmptySlot;
+        return s;
+    }
+
+    //what the game sees in a slot right now: the host devices plus scripted test input
+    public static PadSlot Read(int slot)
+    {
+        var s = Slots[slot];
+        Input.ScriptedInput.Apply(slot, ref s);
+        return s;
+    }
 }

@@ -58,6 +58,7 @@ public static class FunctionPipeline
                     var t = instr.JumpTarget;
                     if (t < lo || t >= hi || starts.Contains(t) || targets.Contains(t)) continue;
                     if (!bodies.Any(f => t > f.Start && t < f.End)) continue;
+                    if (!FunctionDetector.IsPlausibleForeignEntry(owner.Instructions, t)) continue;
 
                     targets.Add(t);
                 }

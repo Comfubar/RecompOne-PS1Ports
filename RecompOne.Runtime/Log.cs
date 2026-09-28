@@ -12,6 +12,14 @@ public static class Log
     public static bool MdecOn = false;
     public static bool IrqOn = false;
 
+    //overlay matching details (candidates skipped while looking for the overlay that is in ram)
+    public static bool DispatchOn = Environment.GetEnvironmentVariable("RECOMPONE_LOG_DISPATCH") == "1";
+
+    public static void Dispatch(string m)
+    {
+        if (DispatchOn) Console.WriteLine($"[Dispatcher] {m}");
+    }
+
     public static void Mdec(string m)
     {
         if (MdecOn) Console.WriteLine($"[MDEC] {m}");

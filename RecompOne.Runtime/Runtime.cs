@@ -69,8 +69,8 @@ public static class Runtime
         Config.ConfigManager.SaveView(Host.Window.PanelManager.Panels);
     }
 
-    public static Hardware.MemoryCard CardA = new("carda.sav") { Enabled = true };
-    public static Hardware.MemoryCard CardB = new("cardb.sav") { Enabled = true };
+    public static Hardware.MemoryCard CardA = new(Config.ConfigManager.DataPath("carda.sav")) { Enabled = true };
+    public static Hardware.MemoryCard CardB = new(Config.ConfigManager.DataPath("cardb.sav")) { Enabled = true };
 
     private static void LoadMemoryCards()
     {
@@ -80,7 +80,7 @@ public static class Runtime
 
         static string Fallback(string path, string def)
         {
-            return string.IsNullOrWhiteSpace(path) ? def : path;
+            return Config.ConfigManager.DataPath(string.IsNullOrWhiteSpace(path) ? def : path);
         }
     }
 
@@ -95,6 +95,7 @@ public static class Runtime
         {
             _hostReady = true;
             Diagnostics.ConsoleMirror.Install();
+            Diagnostics.CrashReporter.Install();
             Host.GpuJobs.Run(() => HostWindow.Initialize(title));
             Audio.Initialize();
         }
@@ -189,23 +190,30 @@ public static class Runtime
         Spu = null;
         Cd = null;
 
-        if (Hle.GpuHle.Backend is { Ready: true } backend)
+        //this runs on the game thread, but the gl context belongs to the thread that owns the window (Run claims
+        //it), flushing here replays recorded draws into gl from the wrong thread and crashed in the driver
+        Host.GpuJobs.Run(() =>
         {
+            if (Hle.GpuHle.Backend is not { Ready: true } backend) return;
             backend.FillRect(0, 0, Gpu.VramWidth, Gpu.VramHeight, 0);
             backend.Flush();
-        }
+        });
     }
 
     private static volatile bool _gameDone;
     private static readonly System.Diagnostics.Stopwatch _presentWatch = System.Diagnostics.Stopwatch.StartNew();
     private static double _nextPresentMs;
     
-    public static void Run(Action boot)
+    //maxStackSize: recompiled code turns guest calls into nested host calls, deep call chains can need more than
+    //the default 1MB thread stack, 0 keeps the default
+    //returns the process exit code: 0 when the game ended normally, 1 when it crashed (see CrashReporter)
+    public static int Run(Action boot, int maxStackSize = 0)
     {
+        Diagnostics.CrashReporter.Install();
         Pgxp.PgxpGpu.Init();
         Host.GpuJobs.Claim();
         
-        var thread = new Thread(() => RunGame(boot))
+        var thread = new Thread(() => RunGame(boot), maxStackSize)
         {
             IsBackground = true,
             Name = "game"
@@ -215,7 +223,11 @@ public static class Runtime
         
         while (!_gameDone)
             PresentLoop();
+
+        return _crashed ? 1 : 0;
     }
+
+    private static volatile bool _crashed;
     
     private static void RunGame(Action boot)
     {
@@ -233,6 +245,8 @@ public static class Runtime
             catch (Exception e)
             {
                 Console.Error.WriteLine($"[Runtime] runtime has crashed: {e}");
+                Diagnostics.CrashReporter.Report(e, "exception on the game thread");
+                _crashed = true;
                 break;
             }
         
@@ -319,12 +333,14 @@ public static class Runtime
     
     public static void PresentFrame()
     {
+        Diagnostics.TestScript.Tick();
         if (_hardResetPending)
         {
             _hardResetPending = false;
             throw new HardResetSignal();
         }
 
+        Diagnostics.CrashReporter.Tick();
         Interp.Interp.Backend?.Publish();
         
         Audio.Attach(Spu);
@@ -337,7 +353,10 @@ public static class Runtime
             Sdk.LibPad.Refresh(Mem);
         } //is this correct?
 
-        Interrupts.Raise(0);
+        //no Interrupts.Raise(0) here: the vblank interrupt comes from the real time clock (Interrupts.TickVBlank, reached
+        //through the Poll calls in the recompiled code and while VSync waits). Raising it for every presented frame as
+        //well gave the game about 120 vblank interrupts a second, so everything it times from its vblank handler (pad
+        //polling, menu auto repeat, sound sequencing) ran twice as fast
     }
 
     public static void DispatchIrq(int irq)

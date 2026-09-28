@@ -301,6 +301,7 @@ public static class BiosB
         e.Context = Runtime.Cpu!;
         e.Memory = m;
         e.Port = port;
+        e.Slot = 0;
         e.Buttons = buttons;
         Event.Dispatch(e);
         return e.Buttons;
@@ -309,17 +310,21 @@ public static class BiosB
     private static void PadRead(IMemory m)
     {
         if (_padBuf == 0) return;
-        var s = Hardware.Controller.State;
+        var p1 = Hardware.Controller.Read(0);
+        var p2 = Hardware.Controller.Read(4);
+        var s = p1.Buttons;
         var swapped = (ushort)((s >> 8) | (s << 8));
-        var s2 = Hardware.Controller.State2;
+        var s2 = p2.Buttons;
         var swapped2 = (ushort)((s2 >> 8) | (s2 << 8));
         swapped = FirePad(m, 0, swapped);
         swapped2 = FirePad(m, 1, swapped2);
         m.WriteU32(_padBuf, ((uint)swapped2 << 16) | swapped);
-        m.WriteU8(_padBuf + 4, Hardware.Controller.RightX);
-        m.WriteU8(_padBuf + 5, Hardware.Controller.RightY);
-        m.WriteU8(_padBuf + 6, Hardware.Controller.LeftX);
-        m.WriteU8(_padBuf + 7, Hardware.Controller.LeftY);
+        m.WriteU8(_padBuf + 4, p1.RightX);
+        m.WriteU8(_padBuf + 5, p1.RightY);
+        m.WriteU8(_padBuf + 6, p1.LeftX);
+        m.WriteU8(_padBuf + 7, p1.LeftY);
+        Input.InputTrace.Data("BIOS PAD_init buffer", 0, true, s);
+        Input.InputTrace.Data("BIOS PAD_init buffer", 4, p2.Connected, s2);
     }
 
     private static void InitPad(IMemory m, uint buf1, uint siz1, uint buf2, uint siz2)
@@ -334,15 +339,15 @@ public static class BiosB
     {
         if (!_padCardStarted) return;
 
-        var b1 = Unswap(FirePad(m, 0, Swap(Hardware.Controller.State)));
-        WritePadSlot(m, _padCardBuf1, true, b1,
-            Hardware.Controller.RightX, Hardware.Controller.RightY,
-            Hardware.Controller.LeftX, Hardware.Controller.LeftY, Hardware.Controller.Analog);
+        var p1 = Hardware.Controller.Read(0);
+        var b1 = Unswap(FirePad(m, 0, Swap(p1.Buttons)));
+        WritePadSlot(m, _padCardBuf1, true, b1, p1.RightX, p1.RightY, p1.LeftX, p1.LeftY, p1.Analog);
+        Input.InputTrace.Data("BIOS InitPad buffer", 0, true, b1);
 
-        var b2 = Unswap(FirePad(m, 1, Swap(Hardware.Controller.State2)));
-        WritePadSlot(m, _padCardBuf2, Hardware.Controller.Connected2, b2,
-            Hardware.Controller.RightX2, Hardware.Controller.RightY2,
-            Hardware.Controller.LeftX2, Hardware.Controller.LeftY2, Hardware.Controller.Analog2);
+        var p2 = Hardware.Controller.Read(4);
+        var b2 = Unswap(FirePad(m, 1, Swap(p2.Buttons)));
+        WritePadSlot(m, _padCardBuf2, p2.Connected, b2, p2.RightX, p2.RightY, p2.LeftX, p2.LeftY, p2.Analog);
+        Input.InputTrace.Data("BIOS InitPad buffer", 4, p2.Connected, b2);
     }
 
     private static ushort Swap(ushort v)

@@ -47,7 +47,7 @@ public static class FunctionDetector
         foreach (var instr in all)
         {
             var op = instr.Word >> 26;
-            if (op == 3) // JAL
+            if (op == 3 && !IsMidFunction(all, instr.JumpTarget)) // JAL
                 entries.Add(instr.JumpTarget);
         }
 
@@ -153,6 +153,7 @@ public static class FunctionDetector
                 var t = instr.JumpTarget;
                 if (t < codeStart || t >= codeEnd) continue;
                 if (knownStarts.Contains(t)) continue;
+                if (IsMidFunction(all, t)) continue;
 
                 var host = allFuncs.FirstOrDefault(g => t > g.Start && t < g.End);
                 if (host != null)
@@ -258,6 +259,9 @@ public static class FunctionDetector
                 var idx = InstrIndex(all, t);
                 if (idx < 0 || idx >= all.Length) continue;
                 if (!IsKnownInstruction(all[idx])) continue;
+                //a jal from real code never lands inside a function, one that does was decoded from data that
+                //the sweep took for code
+                if (instr.Word >> 26 == 3 && IsMidFunction(all, t)) continue;
 
                 targets.Add(t);
             }
@@ -407,6 +411,65 @@ public static class FunctionDetector
         }
 
         return extras;
+    }
+
+    private const uint CrossWindow = 0x400;
+
+    //data words can decode as a jal, a target that sits right after a non terminator and that a nearby
+    //branch jumps across is the inside of a function, making it a start would cut that function in two
+    public static bool IsMidFunction(MipsInstruction[] all, uint t)
+    {
+        return IsReturnSite(all, t) || (!FollowsTerminator(all, t) && CrossedByBranch(all, t));
+    }
+
+    //right after a call and its delay slot is where the callee returns to, so it continues the caller
+    private static bool IsReturnSite(MipsInstruction[] all, uint t)
+    {
+        var idx = InstrIndex(all, t);
+        if (idx < 2 || idx >= all.Length) return false;
+        var call = all[idx - 2];
+        var op = call.Word >> 26;
+        return op == 3 || (op == 0 && (call.Word & 0x3F) == 9) || (op == 1 && call.Rt is 0x10 or 0x11);
+    }
+
+    //a jump into this image found in another image has nothing here backing it up, so either sign of being
+    //inside a function is enough to throw it away
+    public static bool IsPlausibleForeignEntry(MipsInstruction[] all, uint t)
+    {
+        return FollowsTerminator(all, t) && !CrossedByBranch(all, t);
+    }
+
+    //the previous instruction, skipping nop padding, is the delay slot of a jr/j/b
+    private static bool FollowsTerminator(MipsInstruction[] all, uint t)
+    {
+        var idx = InstrIndex(all, t);
+        if (idx < 2 || idx >= all.Length) return true;
+
+        var p = idx - 1;
+        while (p > 1 && all[p].IsNop && !EndsControlFlow(all[p - 1])) p--;
+        return EndsControlFlow(all[p - 1]);
+    }
+
+    private static bool CrossedByBranch(MipsInstruction[] all, uint t)
+    {
+        var idx = InstrIndex(all, t);
+        if (idx < 0 || idx >= all.Length) return false;
+
+        var from = Math.Max(0, InstrIndex(all, t > CrossWindow ? t - CrossWindow : 0));
+        var to = Math.Min(all.Length, idx + (int)(CrossWindow / 4));
+        for (var i = from; i < to; i++)
+        {
+            var instr = all[i];
+            var op = instr.Word >> 26;
+            //a j across t also counts: a tail call j over a real start still leaves that start after a
+            //terminator, so it is only ever combined with !FollowsTerminator
+            if (op != 1 && op != 2 && (op < 4 || op > 7)) continue;
+            var a = instr.Vram;
+            var b = op == 2 ? instr.JumpTarget : instr.BranchTarget;
+            if ((a < t && t <= b) || (b < t && t <= a)) return true;
+        }
+
+        return false;
     }
 
     private static bool EndsControlFlow(MipsInstruction i)

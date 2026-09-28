@@ -6,7 +6,7 @@ namespace RecompOne.Recompiler.CodeGen;
 public static class EntryWriter
 {
     public static void Write(PsxExe exe, SystemCfg sysCfg, string bootExe, string className, string? mainCall,
-        List<string> overlays, string outDir)
+        List<string> overlays, string outDir, string? stubsDir = null)
     {
         var entry = new StringBuilder();
         entry.AppendLine("using RecompOne.Runtime.Cdrom;");
@@ -59,7 +59,7 @@ public static class EntryWriter
         stubs.AppendLine("}");
 
         File.WriteAllText(Path.Combine(outDir, "Entry.cs"), entry.ToString());
-        File.WriteAllText(Path.Combine(outDir, "Stubs.cs"), stubs.ToString());
+        File.WriteAllText(Path.Combine(stubsDir ?? outDir, "Stubs.cs"), stubs.ToString());
     }
 
     private static string DispatchTableName(string name)

@@ -179,8 +179,38 @@ public static class AutoConfigurator
         }
     }
 
+    //same analysis as a full autoconfigure, for one overlay that is already described in a config
+    public static bool SweepOverlay(RecompOneConfig config, DiscFs fs, OverlayConfig overlay, string funcMapPath,
+        string? signaturePath)
+    {
+        var db = LoadSignatures(signaturePath);
+        Console.WriteLine($"[autoconfig] signatures: {db.Names} function(s), {db.Count} variant(s)");
+
+        var clone = new OverlayConfig
+        {
+            Name = overlay.Name,
+            File = overlay.File,
+            LocalFile = overlay.LocalFile,
+            Archive = overlay.Archive,
+            Entry = overlay.Entry,
+            Lba = overlay.Lba,
+            Offset = overlay.Offset,
+            Skip = overlay.Skip,
+            Size = overlay.Size,
+            Base = overlay.Base,
+            Rebase = overlay.Rebase,
+            Compression = overlay.Compression,
+            Functions = overlay.Functions,
+            LinearSweep = true
+        };
+
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(funcMapPath))!);
+        return Sweep(config, fs, db, clone, Path.GetDirectoryName(Path.GetFullPath(funcMapPath))!,
+            Path.GetFullPath(funcMapPath));
+    }
+
     private static bool Sweep(RecompOneConfig config, DiscFs fs, SignatureDb db, OverlayConfig overlay,
-        string funcmapDir)
+        string funcmapDir, string? outPath = null)
     {
         OverlayWriter.OverlayAnalysis? analysis;
         try
@@ -210,7 +240,7 @@ public static class AutoConfigurator
                 Size = f.End - f.Start
             });
 
-        var path = Path.Combine(funcmapDir, $"{overlay.Name}.json");
+        var path = outPath ?? Path.Combine(funcmapDir, $"{overlay.Name}.json");
         FunctionMapLoader.Save(path, info);
 
         Console.WriteLine($"[autoconfig] {overlay.Name}: {info.Functions.Count} function(s), " +

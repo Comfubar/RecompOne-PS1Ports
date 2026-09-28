@@ -237,8 +237,12 @@ public static class Interrupts
         }
     }
 
+    //vblank interrupts the game was given, for FrameDiagnostics
+    public static long VBlankIrqsServiced;
+
     private static void ServiceIrq(int irq, CpuContext cpu, IMemory mem)
     {
+        if (irq == 0) VBlankIrqsServiced++;
         BiosB.DeliverIrqEvents(cpu, mem, irq);
 
         DispatchChains(cpu, mem);

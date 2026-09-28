@@ -108,6 +108,7 @@ internal static unsafe class Audio
             _al.SourceUnqueueBuffers(_source, 1, &buf);
 
             spu.Mix(_sampleBuf, FramesPerBuffer);
+            Diagnostics.AudioStats.Output(_sampleBuf);
 
             _al.BufferData(buf, BufferFormat.Stereo16, _sampleBuf, 44100);
             _al.SourceQueueBuffers(_source, 1, &buf);

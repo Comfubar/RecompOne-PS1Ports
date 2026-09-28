@@ -39,6 +39,9 @@ internal sealed class InputSettingsSection : ISettingsSection
 
     public void Draw()
     {
+        DrawGeneral();
+        ImGui.Separator();
+        ImGui.Spacing();
         DrawDeviceSelector();
         ImGui.Spacing();
         DrawPadSelector();
@@ -50,6 +53,18 @@ internal sealed class InputSettingsSection : ISettingsSection
         {
             DrawDeviceCombo();
             ImGui.Spacing();
+        }
+
+        var slot = InputManager.SlotOfPlayer(_padIndex);
+        ImGuiEx.TextColored(new Vector4(0.6f, 0.6f, 0.65f, 1f), slot >= 0
+            ? Localization.T("settings.input.slot", Hardware.Controller.SlotName(slot))
+            : Localization.T("settings.input.slot.none"));
+        ImGui.Spacing();
+
+        if (!_gamepadMode && _padIndex > 1)
+        {
+            ImGuiEx.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f), Localization.T("settings.input.keyboard_players"));
+            return;
         }
 
         if (_gamepadMode && !InputManager.IsPadConnected(_padIndex))
@@ -76,17 +91,7 @@ internal sealed class InputSettingsSection : ISettingsSection
             }
             else
             {
-                var analog = ConfigManager.Game.KindFor(_padIndex) == PadKind.Analog;
-                if (_padIndex == 0)
-                {
-                    if (analog) ConfigManager.Game.PadAnalog = GamepadBindings.DefaultAnalog();
-                    else ConfigManager.Game.Pad = new GamepadBindings();
-                }
-                else
-                {
-                    if (analog) ConfigManager.Game.PadAnalog2 = GamepadBindings.Empty();
-                    else ConfigManager.Game.Pad2 = GamepadBindings.Empty();
-                }
+                ConfigManager.Game.ResetPad(_padIndex);
             }
 
             _remapRow = -1;
@@ -135,8 +140,7 @@ internal sealed class InputSettingsSection : ISettingsSection
     private void DrawPadKind()
     {
         var cfg = ConfigManager.Game;
-        var kind = _padIndex == 0 ? cfg.PadKind : cfg.PadKind2;
-        var index = (int)kind;
+        var index = (int)cfg.KindFor(_padIndex);
 
         ImGui.SetNextItemWidth(220f);
         if (ImGui.BeginCombo(Localization.T("settings.input.kind"), Localization.T(PadKindKeys[index])))
@@ -144,8 +148,7 @@ internal sealed class InputSettingsSection : ISettingsSection
             for (var i = 0; i < PadKindKeys.Length; i++)
                 if (ImGui.Selectable(Localization.T(PadKindKeys[i]), i == index))
                 {
-                    if (_padIndex == 0) cfg.PadKind = (PadKind)i;
-                    else cfg.PadKind2 = (PadKind)i;
+                    cfg.SetKind(_padIndex, (PadKind)i);
                     ConfigManager.SaveGame();
                 }
 
@@ -190,12 +193,13 @@ internal sealed class InputSettingsSection : ISettingsSection
                 ImGui.EndTabItem();
             }
 
-            if (ImGui.BeginTabItem(Localization.T("settings.input.pad", 2)))
-            {
-                if (_padIndex != 1) _remapRow = -1;
-                _padIndex = 1;
-                ImGui.EndTabItem();
-            }
+            for (var p = 1; p < GameConfig.MaxPlayers; p++)
+                if (ImGui.BeginTabItem(Localization.T("settings.input.pad", p + 1)))
+                {
+                    if (_padIndex != p) _remapRow = -1;
+                    _padIndex = p;
+                    ImGui.EndTabItem();
+                }
 
             ImGui.EndTabBar();
         }
@@ -204,7 +208,7 @@ internal sealed class InputSettingsSection : ISettingsSection
     private void DrawDeviceCombo()
     {
         var devices = InputManager.Devices;
-        var current = _padIndex == 0 ? ConfigManager.Game.PadDevice : ConfigManager.Game.PadDevice2;
+        var current = ConfigManager.Game.DeviceFor(_padIndex);
 
         var preview = Localization.T("settings.input.device.auto");
         foreach (var d in devices)
@@ -236,12 +240,65 @@ internal sealed class InputSettingsSection : ISettingsSection
         ImGui.SameLine();
         if (ImGui.Button(Localization.T("settings.input.device.refresh")))
             InputManager.RefreshDevices();
+
+        //a pad remapper (DualSenseX, DS4Windows, Steam Input) can show one pad twice, a real one and a virtual Xbox
+        //pad; ignoring one of them stops a single pad from being two players
+        if (InputManager.IsPadConnected(_padIndex) && ImGui.Button(Localization.T("settings.input.ignore_device")))
+        {
+            var name = InputManager.PlayerDeviceName(_padIndex);
+            if (name.Length > 0 && !ConfigManager.Game.IgnoredPads.Contains(name))
+            {
+                ConfigManager.Game.IgnoredPads.Add(name);
+                ConfigManager.SaveGame();
+                InputManager.RefreshDevices();
+            }
+        }
+    }
+
+    private static readonly string[] MultitapKeys =
+        ["settings.input.multitap.auto", "settings.input.multitap.on", "settings.input.multitap.off"];
+
+    private void DrawGeneral()
+    {
+        var cfg = ConfigManager.Game;
+        var mt = (int)cfg.Multitap;
+        ImGui.SetNextItemWidth(260f);
+        if (ImGui.BeginCombo(Localization.T("settings.input.multitap"), Localization.T(MultitapKeys[mt])))
+        {
+            for (var i = 0; i < MultitapKeys.Length; i++)
+                if (ImGui.Selectable(Localization.T(MultitapKeys[i]), i == mt))
+                {
+                    cfg.Multitap = (MultitapMode)i;
+                    ConfigManager.SaveGame();
+                }
+
+            ImGui.EndCombo();
+        }
+
+        var dz = cfg.StickDeadzone;
+        ImGui.SetNextItemWidth(260f);
+        if (ImGui.SliderFloat(Localization.T("settings.input.deadzone"), ref dz, 0f, 0.6f, "%.2f"))
+        {
+            cfg.StickDeadzone = dz;
+            ConfigManager.SaveGame();
+        }
+
+        if (cfg.IgnoredPads.Count == 0) return;
+        ImGuiEx.TextColored(new Vector4(0.6f, 0.6f, 0.65f, 1f), Localization.T("settings.input.ignored"));
+        foreach (var name in cfg.IgnoredPads.ToList())
+        {
+            ImGui.TextUnformatted(name);
+            ImGui.SameLine();
+            if (!ImGui.SmallButton($"{Localization.T("settings.input.unignore")}##{name}")) continue;
+            cfg.IgnoredPads.Remove(name);
+            ConfigManager.SaveGame();
+            InputManager.RefreshDevices();
+        }
     }
 
     private void SetDevice(string id)
     {
-        if (_padIndex == 0) ConfigManager.Game.PadDevice = id;
-        else ConfigManager.Game.PadDevice2 = id;
+        ConfigManager.Game.SetDevice(_padIndex, id);
         ConfigManager.SaveGame();
         InputManager.RefreshDevices();
     }

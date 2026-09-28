@@ -22,8 +22,27 @@ public static class ConfigManager
         DefaultIgnoreCondition = JsonIgnoreCondition.Never
     };
 
-    private const string GameConfigPath = "settings.json";
-    private const string InterfaceFile = "interface.ini";
+    private static readonly string GameConfigPath = DataPath("settings.json");
+    private static readonly string InterfaceFile = DataPath("interface.ini");
+
+    //settings and memory cards live next to the executable, wherever it is started from. A relative path is taken
+    //from the executable's folder; older builds kept these files in the working directory, so one found only there
+    //is copied over the first time.
+    public static string DataPath(string path)
+    {
+        if (Path.IsPathRooted(path)) return path;
+        var full = Path.Combine(AppContext.BaseDirectory, path);
+        var old = Path.GetFullPath(path);
+        if (!File.Exists(full) && File.Exists(old) &&
+            !string.Equals(full, old, StringComparison.OrdinalIgnoreCase))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.Copy(old, full);
+            Console.WriteLine($"[Config] copied {old} to {full} (files now live next to the executable)");
+        }
+
+        return full;
+    }
 
     public static GameConfig Game { get; private set; } = new();
     public static ViewConfig View { get; private set; } = new();

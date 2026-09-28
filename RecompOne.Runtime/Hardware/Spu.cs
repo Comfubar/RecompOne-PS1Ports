@@ -464,6 +464,7 @@ public sealed class Spu
     private void KeyOn(ushort mask, bool hi)
     {
         var bits = (uint)mask << (hi ? 16 : 0);
+        Diagnostics.AudioStats.CountKeyOns(bits);
         _konPending |= bits;
         _koffPending &= ~bits;
         _endx &= ~bits;

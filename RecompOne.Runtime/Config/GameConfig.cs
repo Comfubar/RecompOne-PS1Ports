@@ -37,6 +37,14 @@ public enum PadKind
     Analog
 }
 
+public enum MultitapMode
+{
+    //a multitap is in port 1 whenever more than two players have a controller
+    Auto,
+    On,
+    Off
+}
+
 public class GamepadBindings
 {
     public int[] Cross { get; set; } = [0];
@@ -94,25 +102,96 @@ public class GameConfig
     public bool Muted { get; set; } = false;
     public KeyBindings Keys { get; set; } = new();
     public KeyBindings Keys2 { get; set; } = KeyBindings.Empty();
+    //players 1-4. The buttons use SDL's positional names (south = A on Xbox = Cross on PlayStation), so the same
+    //defaults fit Xbox, PlayStation and Nintendo pads
     public GamepadBindings Pad { get; set; } = new();
-    public GamepadBindings Pad2 { get; set; } = GamepadBindings.Empty();
+    public GamepadBindings Pad2 { get; set; } = new();
+    public GamepadBindings Pad3 { get; set; } = new();
+    public GamepadBindings Pad4 { get; set; } = new();
     public string PadDevice { get; set; } = "";
     public string PadDevice2 { get; set; } = "";
+    public string PadDevice3 { get; set; } = "";
+    public string PadDevice4 { get; set; } = "";
     public GamepadBindings PadAnalog { get; set; } = GamepadBindings.DefaultAnalog();
-    public GamepadBindings PadAnalog2 { get; set; } = GamepadBindings.Empty();
+    public GamepadBindings PadAnalog2 { get; set; } = GamepadBindings.DefaultAnalog();
+    public GamepadBindings PadAnalog3 { get; set; } = GamepadBindings.DefaultAnalog();
+    public GamepadBindings PadAnalog4 { get; set; } = GamepadBindings.DefaultAnalog();
     public PadKind PadKind { get; set; } = PadKind.Digital;
     public PadKind PadKind2 { get; set; } = PadKind.Digital;
+    public PadKind PadKind3 { get; set; } = PadKind.Digital;
+    public PadKind PadKind4 { get; set; } = PadKind.Digital;
 
-    public PadKind KindFor(int port)
+    public MultitapMode Multitap { get; set; } = MultitapMode.Auto;
+
+    //0..1 of the stick range that counts as centred, for the analog values and for sticks bound to buttons
+    public float StickDeadzone { get; set; } = 0.20f;
+
+    //controllers to leave alone, by SDL GUID or part of the name (for example a pad remapper that shows the same
+    //physical pad twice, once as itself and once as a virtual Xbox pad)
+    public List<string> IgnoredPads { get; set; } = [];
+
+    public const int MaxPlayers = 4;
+
+    public PadKind KindFor(int player)
     {
-        return port == 0 ? PadKind : PadKind2;
+        return player switch { 0 => PadKind, 1 => PadKind2, 2 => PadKind3, _ => PadKind4 };
     }
 
-    public GamepadBindings PadFor(int port)
+    public string DeviceFor(int player)
     {
-        return port == 0
-            ? (PadKind == PadKind.Analog ? PadAnalog : Pad)
-            : (PadKind2 == PadKind.Analog ? PadAnalog2 : Pad2);
+        return player switch { 0 => PadDevice, 1 => PadDevice2, 2 => PadDevice3, _ => PadDevice4 };
+    }
+
+    public void SetKind(int player, PadKind kind)
+    {
+        switch (player)
+        {
+            case 0: PadKind = kind; break;
+            case 1: PadKind2 = kind; break;
+            case 2: PadKind3 = kind; break;
+            default: PadKind4 = kind; break;
+        }
+    }
+
+    public void SetDevice(int player, string id)
+    {
+        switch (player)
+        {
+            case 0: PadDevice = id; break;
+            case 1: PadDevice2 = id; break;
+            case 2: PadDevice3 = id; break;
+            default: PadDevice4 = id; break;
+        }
+    }
+
+    //back to the default layout for the player's current pad kind
+    public void ResetPad(int player)
+    {
+        var analog = KindFor(player) == PadKind.Analog;
+        var fresh = analog ? GamepadBindings.DefaultAnalog() : new GamepadBindings();
+        switch (player, analog)
+        {
+            case (0, true): PadAnalog = fresh; break;
+            case (0, false): Pad = fresh; break;
+            case (1, true): PadAnalog2 = fresh; break;
+            case (1, false): Pad2 = fresh; break;
+            case (2, true): PadAnalog3 = fresh; break;
+            case (2, false): Pad3 = fresh; break;
+            case (_, true): PadAnalog4 = fresh; break;
+            default: Pad4 = fresh; break;
+        }
+    }
+
+    public GamepadBindings PadFor(int player)
+    {
+        var analog = KindFor(player) == PadKind.Analog;
+        return player switch
+        {
+            0 => analog ? PadAnalog : Pad,
+            1 => analog ? PadAnalog2 : Pad2,
+            2 => analog ? PadAnalog3 : Pad3,
+            _ => analog ? PadAnalog4 : Pad4
+        };
     }
 
     public List<string> ActiveMods { get; set; } = [];

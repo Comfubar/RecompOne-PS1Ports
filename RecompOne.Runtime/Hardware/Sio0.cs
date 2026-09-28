@@ -321,27 +321,57 @@ public sealed class Sio0
         }
     }
 
+    //multitap: a poll is 01h 42h TAP ... The multitap answers in its own format (ID 80h, 5Ah, then 4 x 8 bytes, one
+    //block per slot A-D: ID, 5Ah, two button bytes, four analog bytes, all FFh for an empty slot) when the previous
+    //poll of that port sent TAP = 01h; otherwise it passes slot A through as a plain pad, so software that does not
+    //know about the tap still sees one controller. 35 bytes in all, which is libpad's 34 byte receive buffer.
+    private readonly bool[] _tapMode = new bool[2];
+
+    //the pad as sampled at the start of the current transfer, one sample per poll (not per byte)
+    private Controller.PadSlot _pad;
+    private static readonly Events.PadReadEvent _readEvent = new();
+    private static int _unsupported;
+    private bool _tapFrame;
+    private readonly byte[] _tapData = new byte[32];
+    private const byte TapId = 0x80;
+    private const int TapFrameEnd = 2 + 32;
+
     private bool PadTransfer(byte value, out byte rx)
     {
         var port2 = (_ctrl & CtrlPort2) != 0;
-        if (port2 && !Controller.Connected2)
+        var portIdx = port2 ? 1 : 0;
+        var baseSlot = port2 ? 4 : 0;
+        var tap = port2 ? Controller.Multitap2 : Controller.Multitap1;
+        var step = _step++;
+
+        if (step == 0)
         {
+            _tapFrame = tap && _tapMode[portIdx];
+            if (!_tapFrame) _pad = Sample(baseSlot);
+            if (!_tapFrame && !_pad.Connected)
+            {
+                rx = 0xFF;
+                _step = 0;
+                _device = DeviceNone;
+                Input.InputTrace.Data("SIO0 poll", baseSlot, false, 0xFFFF);
+                return false;
+            }
+
             rx = 0xFF;
-            _step = 0;
-            return false;
+            return true;
         }
 
-        var buttons = port2 ? Controller.State2 : Controller.State;
-        var analog = port2 ? Controller.Analog2 : Controller.Analog;
-        var step = _step++;
+        if (_tapFrame) return TapTransfer(step, value, portIdx, baseSlot, out rx);
+
+        var pad = _pad;
+        var buttons = pad.Buttons;
+        var analog = pad.Analog;
         switch (step)
         {
-            case 0:
-                rx = 0xFF;
-                return true;
             case 1:
                 if (value != 0x42)
                 {
+                    Input.InputTrace.Call("SIO0 pad command", $"slot {Controller.SlotName(baseSlot)} cmd 0x{value:X2}", $"not supported (#{++_unsupported})");
                     rx = 0xFF;
                     _step = 0;
                     return false;
@@ -350,6 +380,8 @@ public sealed class Sio0
                 rx = analog ? (byte)0x73 : (byte)0x41;
                 return true;
             case 2:
+                //the TAP byte: 01h asks a multitap for all four slots, from the next poll on
+                _tapMode[portIdx] = tap && value == 0x01;
                 rx = 0x5A;
                 return true;
             case 3:
@@ -357,21 +389,23 @@ public sealed class Sio0
                 return true;
             case 4:
                 rx = (byte)(buttons >> 8);
+                Input.InputTrace.Data("SIO0 poll", baseSlot, true, buttons);
+                if (analog) Input.InputTrace.Sticks("SIO0 poll", baseSlot, pad.LeftX, pad.LeftY, pad.RightX, pad.RightY);
                 if (analog) return true;
                 _step = 0;
                 _device = DeviceNone;
                 return false;
             case 5:
-                rx = port2 ? Controller.RightX2 : Controller.RightX;
+                rx = pad.RightX;
                 return true;
             case 6:
-                rx = port2 ? Controller.RightY2 : Controller.RightY;
+                rx = pad.RightY;
                 return true;
             case 7:
-                rx = port2 ? Controller.LeftX2 : Controller.LeftX;
+                rx = pad.LeftX;
                 return true;
             case 8:
-                rx = port2 ? Controller.LeftY2 : Controller.LeftY;
+                rx = pad.LeftY;
                 _step = 0;
                 _device = DeviceNone;
                 return false;
@@ -379,6 +413,77 @@ public sealed class Sio0
                 rx = 0xFF;
                 _step = 0;
                 return false;
+        }
+    }
+
+    private bool TapTransfer(int step, byte value, int portIdx, int baseSlot, out byte rx)
+    {
+        switch (step)
+        {
+            case 1:
+                if (value != 0x42)
+                {
+                    Input.InputTrace.Call("SIO0 multitap command", $"port {portIdx + 1} cmd 0x{value:X2}", $"not supported (#{++_unsupported})");
+                    rx = 0xFF;
+                    _step = 0;
+                    return false;
+                }
+
+                rx = TapId;
+                return true;
+            case 2:
+                _tapMode[portIdx] = value == 0x01;
+                FillTapData(baseSlot);
+                rx = 0x5A;
+                return true;
+        }
+
+        rx = _tapData[step - 3];
+        if (step < TapFrameEnd) return true;
+        _step = 0;
+        _device = DeviceNone;
+        return false;
+    }
+
+    //the slot as the game will receive it: host devices, scripted input, then PadReadEvent listeners (mods, remaps)
+    private static Controller.PadSlot Sample(int slot)
+    {
+        var p = Controller.Read(slot);
+        if (!p.Connected || !Events.Event.HasAnyListeners<Events.PadReadEvent>()) return p;
+        var e = _readEvent;
+        e.Context = Runtime.Cpu!;
+        e.Memory = Runtime.Mem!;
+        e.Port = slot < 4 ? 0 : 1;
+        e.Slot = slot & 3;
+        e.Buttons = p.Buttons;
+        Events.Event.Dispatch(e);
+        p.Buttons = e.Buttons;
+        return p;
+    }
+
+    private void FillTapData(int baseSlot)
+    {
+        for (var i = 0; i < 4; i++)
+        {
+            var p = Sample(baseSlot + i);
+            var o = i * 8;
+            Input.InputTrace.Data("SIO0 multitap poll", baseSlot + i, p.Connected, p.Buttons);
+            if (p.Connected && p.Analog)
+                Input.InputTrace.Sticks("SIO0 multitap poll", baseSlot + i, p.LeftX, p.LeftY, p.RightX, p.RightY);
+            if (!p.Connected)
+            {
+                for (var k = 0; k < 8; k++) _tapData[o + k] = 0xFF;
+                continue;
+            }
+
+            _tapData[o + 0] = p.Analog ? (byte)0x73 : (byte)0x41;
+            _tapData[o + 1] = 0x5A;
+            _tapData[o + 2] = (byte)p.Buttons;
+            _tapData[o + 3] = (byte)(p.Buttons >> 8);
+            _tapData[o + 4] = p.Analog ? p.RightX : (byte)0xFF;
+            _tapData[o + 5] = p.Analog ? p.RightY : (byte)0xFF;
+            _tapData[o + 6] = p.Analog ? p.LeftX : (byte)0xFF;
+            _tapData[o + 7] = p.Analog ? p.LeftY : (byte)0xFF;
         }
     }
 }

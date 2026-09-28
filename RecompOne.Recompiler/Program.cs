@@ -8,7 +8,7 @@ using RecompOne.Runtime.Cdrom;
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("usage: recompone <config.json>");
+    Console.Error.WriteLine("usage: recompone <config.json> [-cue <disc.cue>] [-out <dir>] [-sources-only]");
     Console.Error.WriteLine(
         "       recompone --generate-function-file -elf <path> -map <path> -out <output.json> [-rebase <hex>]");
     Console.Error.WriteLine("       recompone --probe-disc <disc> [-json <out.json>] [-all]");
@@ -26,6 +26,26 @@ if (string.Equals(args[0], "--autoconfigure", StringComparison.OrdinalIgnoreCase
 if (string.Equals(args[0], "--generate-function-file", StringComparison.OrdinalIgnoreCase))
     return GenerateFunctionFile(args);
 
+//recompone --dpac <archive.PAC> [-out <dir>] [-compare <index> <exe>]
+if (string.Equals(args[0], "--dpac", StringComparison.OrdinalIgnoreCase))
+    return DpacCommand(args);
+
+//recompone --sweep-overlay <config.json> <overlay> [-signatures <psyq.json>]
+//runs the autoconfigure analysis (sweep + sdk naming) on one overlay of the config and writes its funcMap
+string? sweepOverlay = null, sweepSignatures = null;
+if (string.Equals(args[0], "--sweep-overlay", StringComparison.OrdinalIgnoreCase))
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("usage: recompone --sweep-overlay <config.json> <overlay> [-signatures <psyq.json>]");
+        return 1;
+    }
+
+    sweepOverlay = args[2];
+    if (args.Length >= 5 && args[3] == "-signatures") sweepSignatures = args[4];
+    args = args[1..2];
+}
+
 var configPath = Path.GetFullPath(args[0]);
 if (!File.Exists(configPath))
 {
@@ -36,6 +56,20 @@ if (!File.Exists(configPath))
 var config = ConfigLoader.Load(configPath);
 var configDir = Path.GetDirectoryName(configPath)!;
 
+//-cue and -out override the config, so a tool can point it at the player's own disc and a work folder
+for (var i = 1; i < args.Length; i++)
+{
+    switch (args[i].ToLowerInvariant())
+    {
+        case "-cue": config.Cue = Path.GetFullPath(args[++i]); break;
+        case "-out": config.Game.Output = Path.GetFullPath(args[++i]); break;
+        case "-sources-only": config.SourcesOnly = true; break;
+        default:
+            Console.Error.WriteLine($"unknown argument: {args[i]}");
+            return 1;
+    }
+}
+
 string? ResolvePath(string? p)
 {
     return p == null ? null : Path.IsPathRooted(p) ? p : Path.GetFullPath(Path.Combine(configDir, p));
@@ -44,11 +78,13 @@ string? ResolvePath(string? p)
 config.Elf = ResolvePath(config.Elf);
 config.Map = ResolvePath(config.Map);
 config.FuncMap = ResolvePath(config.FuncMap);
+config.RuntimeProject = ResolvePath(config.RuntimeProject);
 foreach (var overlay in config.Overlays)
 {
     overlay.Elf = ResolvePath(overlay.Elf);
     overlay.Map = ResolvePath(overlay.Map);
     overlay.FuncMap = ResolvePath(overlay.FuncMap);
+    overlay.LocalFile = ResolvePath(overlay.LocalFile);
 }
 
 var cuePath = Path.GetFullPath(Path.Combine(configDir, config.Cue));
@@ -63,6 +99,20 @@ Console.WriteLine($"[RecompOne] Game: {config.Game.Name} ({config.Game.Id})");
 Console.WriteLine($"[RecompOne] Disc file: {cuePath}");
 
 var fs = DiscFs.Open(cuePath);
+
+if (sweepOverlay != null)
+{
+    var target = config.Overlays.FirstOrDefault(o => string.Equals(o.Name, sweepOverlay, StringComparison.OrdinalIgnoreCase));
+    if (target == null)
+    {
+        Console.Error.WriteLine($"overlay '{sweepOverlay}' is not in {configPath}");
+        return 1;
+    }
+
+    var funcMapPath = target.FuncMap ?? Path.Combine(configDir, "funcmaps", $"{target.Name}.json");
+    return AutoConfigurator.SweepOverlay(config, fs, target, funcMapPath, sweepSignatures) ? 0 : 1;
+}
+
 var outDir = Path.GetFullPath(Path.Combine(configDir, config.Game.Output));
 Directory.CreateDirectory(outDir);
 
@@ -79,6 +129,70 @@ catch (Exception ex)
     Console.Error.WriteLine($"[RecompOne] Error: {ex.Message}");
     Console.Error.WriteLine(ex.StackTrace);
     return 1;
+}
+
+static int DpacCommand(string[] args)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("usage: recompone --dpac <archive.PAC> [-out <dir>] [-compare <index> <exe>]");
+        return 1;
+    }
+
+    string? outDir = null, compareExe = null;
+    var compareIndex = -1;
+    for (var i = 2; i < args.Length; i++)
+        switch (args[i].ToLowerInvariant())
+        {
+            case "-out": outDir = args[++i]; break;
+            case "-compare":
+                compareIndex = int.Parse(args[++i]);
+                compareExe = args[++i];
+                break;
+            default:
+                Console.Error.WriteLine($"unknown argument: {args[i]}");
+                return 1;
+        }
+
+    var archive = File.ReadAllBytes(args[1]);
+    var toc = RecompOne.Runtime.Cdrom.Dpac.ReadToc(archive);
+    Console.WriteLine($"[Dpac] {args[1]}: {toc.Count} entries");
+    if (outDir != null) Directory.CreateDirectory(outDir);
+
+    foreach (var e in toc)
+    {
+        var raw = RecompOne.Runtime.Cdrom.Dpac.ReadEntry(archive, e);
+        var packed = RecompOne.Runtime.Cdrom.Dpac.IsBpe(raw);
+        var data = packed ? RecompOne.Runtime.Cdrom.Dpac.Unpack(archive, e) : raw;
+        var kind = "data";
+        if (data.Length >= 0x800 && data.AsSpan(0, 8).SequenceEqual("PS-X EXE"u8))
+            kind = $"PS-X EXE pc=0x{BitConverter.ToUInt32(data, 0x10):X8} t_addr=0x{BitConverter.ToUInt32(data, 0x18):X8} " +
+                   $"t_size=0x{BitConverter.ToUInt32(data, 0x1C):X}";
+        Console.WriteLine($"  [{e.Index,2}] {e.Path,-12} sector {e.Sector,5} size 0x{e.Size:X6} " +
+                          $"{(packed ? $"BPE -> 0x{data.Length:X}" : "stored")}  {kind}");
+        if (outDir != null)
+            File.WriteAllBytes(Path.Combine(outDir, $"{e.Index:D2}_{e.Path.Trim('/').Replace('/', '_')}.bin"), data);
+    }
+
+    if (compareExe == null) return 0;
+
+    //byte for byte check of an unpacked entry's code section against an exe (for example a ram dump)
+    var unpacked = RecompOne.Runtime.Cdrom.Dpac.Unpack(archive, toc[compareIndex]);
+    var reference = File.ReadAllBytes(compareExe);
+    var tSize = (int)BitConverter.ToUInt32(reference, 0x1C);
+    var diffs = 0;
+    var first = -1;
+    for (var i = 0; i < tSize; i++)
+    {
+        var a = 0x800 + i < unpacked.Length ? unpacked[0x800 + i] : -1;
+        if (a == reference[0x800 + i]) continue;
+        if (diffs++ == 0) first = i;
+    }
+
+    Console.WriteLine(diffs == 0
+        ? $"[Dpac] entry {compareIndex} matches {compareExe}: 0x{tSize:X} code bytes identical"
+        : $"[Dpac] entry {compareIndex} differs from {compareExe}: {diffs} of 0x{tSize:X} bytes, first at +0x{first:X}");
+    return diffs == 0 ? 0 : 2;
 }
 
 static int ProbeDisc(string[] args)

@@ -61,6 +61,7 @@ public static class XaAudio
 
     public static void DecodeSector(byte[] sec, int off, byte coding)
     {
+        Diagnostics.AudioStats.XaSectors++;
         var stereo = (coding & 0x01) != 0;
         var rate = (coding & 0x04) != 0 ? 18900 : 37800;
         int[] l = new int[28], r = new int[28];

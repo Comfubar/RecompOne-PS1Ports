@@ -1162,6 +1162,39 @@
       "pt-BR": "Analógicos",
       "es-419": "Sticks analógicos",
       "ja-jp": "アナログスティック"
+    },
+    "settings.input.multitap": {
+      "en": "Multitap (port 1)"
+    },
+    "settings.input.multitap.auto": {
+      "en": "Auto (more than two players)"
+    },
+    "settings.input.multitap.on": {
+      "en": "Always connected"
+    },
+    "settings.input.multitap.off": {
+      "en": "Not connected"
+    },
+    "settings.input.deadzone": {
+      "en": "Stick deadzone"
+    },
+    "settings.input.ignored": {
+      "en": "Ignored controllers:"
+    },
+    "settings.input.ignore_device": {
+      "en": "Ignore this controller"
+    },
+    "settings.input.unignore": {
+      "en": "Use again"
+    },
+    "settings.input.keyboard_players": {
+      "en": "The keyboard can be bound for players 1 and 2 only."
+    },
+    "settings.input.slot": {
+      "en": "This player is in slot {0}"
+    },
+    "settings.input.slot.none": {
+      "en": "No slot for this player: players 3 and 4 need the multitap"
     }
   }
 }

@@ -19,7 +19,11 @@ public static class OverlayWriter
         int LbaStart,
         uint Base,
         uint Size,
-        MipsInstruction[] Instructions);
+        MipsInstruction[] Instructions,
+        DiscImage? Source = null);
+
+    //where an image's bytes are on the disc, when they are read straight from a disc file (see ImageSource)
+    public sealed record DiscImage(string File, string? Archive, int Entry, int Skip);
 
     public static void Write(RecompOneConfig config, DiscFs fs, string outDir)
     {
@@ -35,14 +39,15 @@ public static class OverlayWriter
         Console.WriteLine(
             $"[Recompiler] PS-EXE: PC=0x{mainExe.InitialPC:X8}  GP=0x{mainExe.InitialGP:X8}  SP=0x{mainExe.InitialSP:X8}  load=0x{mainExe.Destination:X8} ");
 
-        var overlayResults = new List<OverlayResult> { AnalyzeMain(config, mainExe) };
+        var overlayResults = new List<OverlayResult>
+            { AnalyzeMain(config, mainExe) with { Source = new DiscImage(sysCfg.BootExe, null, -1, 0x800) } };
 
         foreach (var overlayConfig in config.Overlays)
         {
             var analysis = AnalyzeOverlay(config, overlayConfig, fs);
             if (analysis == null) continue;
             overlayResults.Add(new OverlayResult(overlayConfig.Name, analysis.Functions, analysis.Lba,
-                analysis.Base, (uint)analysis.DiscBin.Length, analysis.Instructions));
+                analysis.Base, (uint)analysis.DiscBin.Length, analysis.Instructions, analysis.Source));
         }
 
         var images = overlayResults.Select(r => new ImageFunctions(r.Name, r.Functions, r.Instructions)).ToList();
@@ -130,7 +135,7 @@ public static class OverlayWriter
             new PipelineOptions(config.Functions, config.LinearSweep, config.PointerScan, config.Stubs,
                 config.Ignored));
 
-        return new OverlayResult("main", funcs, -1, 0, 0, instrs);
+        return new OverlayResult("main", funcs, -1, mainExe.Destination, mainExe.TextSize, instrs);
     }
 
     public sealed record OverlayAnalysis(
@@ -139,10 +144,27 @@ public static class OverlayWriter
         FunctionInfo ElfInfo,
         byte[] DiscBin,
         int Lba,
-        uint Base);
+        uint Base,
+        DiscImage? Source = null);
 
     public static OverlayAnalysis? AnalyzeOverlay(RecompOneConfig config, OverlayConfig overlayConfig, DiscFs fs)
     {
+        //resolved first so a PS-X EXE header can supply the base and the entry point
+        var (discBin, overlayLba, exe, discImage) = ResolveOverlay(fs, overlayConfig);
+        if (discBin == null)
+        {
+            Console.WriteLine(
+                $"[Recompiler] WARNING: could not resolve disc data for overlay '{overlayConfig.Name}', skipping");
+            return null;
+        }
+
+        if (exe != null)
+        {
+            overlayConfig.Base ??= $"0x{exe.Value.TAddr - (uint)overlayConfig.Rebase:X8}";
+            if (overlayConfig.Functions.All(f => Convert.ToUInt32(f.Address, 16) != exe.Value.Pc))
+                overlayConfig.Functions = [..overlayConfig.Functions, new Config.FunctionEntry { Address = $"0x{exe.Value.Pc:X8}" }];
+        }
+
         var noSymbols = overlayConfig.Elf == null && overlayConfig.Map == null && overlayConfig.FuncMap == null;
         if (noSymbols && !((overlayConfig.LinearSweep ?? config.LinearSweep) && overlayConfig.Base != null))
         {
@@ -188,14 +210,6 @@ public static class OverlayWriter
         else
             Console.WriteLine($"[Recompiler] processing the overlay {overlayConfig.Name}");
 
-        var (discBin, overlayLba) = ResolveOverlay(fs, overlayConfig);
-        if (discBin == null)
-        {
-            Console.WriteLine(
-                $"[Recompiler] WARNING: could not resolve disc data for overlay '{overlayConfig.Name}', skipping");
-            return null;
-        }
-
         var rawElf = overlayConfig.Elf != null ? ElfReader.Read(overlayConfig.Elf) : null;
         var rawMap = overlayConfig.Map != null ? MapReader.Read(overlayConfig.Map) : null;
 
@@ -237,7 +251,7 @@ public static class OverlayWriter
         var ovlBase = overlayConfig.Base != null
             ? Convert.ToUInt32(overlayConfig.Base, 16) + (uint)overlayConfig.Rebase
             : 0;
-        return new OverlayAnalysis(funcs, instrs, elfInfo, discBin, overlayLba, ovlBase);
+        return new OverlayAnalysis(funcs, instrs, elfInfo, discBin, overlayLba, ovlBase, discImage);
     }
 
     private static void WriteAll(RecompOneConfig config, string outDir, string className, PsxExe mainExe,
@@ -269,10 +283,20 @@ public static class OverlayWriter
             Console.WriteLine($"[Recompiler] main: {mainCall} @ 0x{mainAddr:X8}");
         }
 
+        ProjectLayoutWriter? layout = null;
+        ImageDir = null;
+        if (config.SplitProjects)
+        {
+            layout = new ProjectLayoutWriter(outDir, config.SourcesOnly ? null : config.RuntimeProject ?? throw new InvalidOperationException(
+                "'splitProjects' needs 'runtimeProject' (path to RecompOne.Runtime.csproj, relative to the config)"));
+            ImageDir = layout.ImageDir;
+        }
+
         foreach (var result in overlayResults)
         {
             Console.WriteLine($"[Recompiler] emiting {result.Name}.cs ({result.Functions.Count} functions)");
-            EmitOverlayFile(result.Name, overlayParts[result.Name], knownFuncs, config.Debug,
+            EmitOverlayFile(result.Name, overlayParts[result.Name], CallTargetsFor(result, overlayResults, overlayParts),
+                config.EmbedImages ? null : result.Source, config.EmbedImages, config.Debug,
                 config.AddressComments, config.DisasmComments, result.LbaStart, result.Base, result.Size,
                 result.Instructions, outDir,
                 SymbolRelocator.Plan(result.Functions, config.Relocations, result.Name));
@@ -280,11 +304,56 @@ public static class OverlayWriter
 
         Console.WriteLine("[Recompiler] Emitting Entry.cs");
         var overlayNames = overlayResults.Select(o => o.Name).ToList();
-        EntryWriter.Write(mainExe, sysCfg, sysCfg.BootExe, className, mainCall, overlayNames, outDir);
+        EntryWriter.Write(mainExe, sysCfg, sysCfg.BootExe, className, mainCall, overlayNames, layout?.EntryDir ?? outDir,
+            layout?.CommonDir);
+
+        if (layout != null)
+        {
+            var resident = overlayResults.FirstOrDefault(r => r.Name == ResidentImage);
+            foreach (var result in overlayResults)
+                layout.WriteImageProject(result.Name,
+                    resident != null && !ReferenceEquals(resident, result) && !Overlaps(result, resident) ? ResidentImage : null);
+            layout.WriteCommonProject();
+            Console.WriteLine($"[Recompiler] split layout: {overlayResults.Count} image projects + Common under {outDir}");
+        }
 
         Console.WriteLine("[Recompiler] finished "); //maybe add time it took
     }
 
+
+    //which functions code in `self` may call directly by address: its own, and the main exe's when self is an
+    //overlay that does not overlap it (main stays resident, so it is always there to call). Everything else goes
+    //through the dispatcher, which knows what is loaded: the EXE.PAC programs all load at 0x800A0000 and must never
+    //bind to each other, and main must not bind to an overlay that may not be loaded. This also keeps the image
+    //dependencies one way (overlay -> main), so each image can be compiled as its own project.
+    private const string ResidentImage = "main";
+
+    private static Dictionary<uint, string> CallTargetsFor(OverlayResult self, List<OverlayResult> all,
+        Dictionary<string, List<OverlayPart>> parts)
+    {
+        var targets = new Dictionary<uint, string>();
+        var resident = all.FirstOrDefault(r => r.Name == ResidentImage);
+        if (resident != null && !ReferenceEquals(resident, self) && !Overlaps(self, resident))
+            foreach (var part in parts[resident.Name])
+            foreach (var f in part.Functions)
+                targets[f.Start] = $"{part.Class}.{f.EmittedName}";
+
+        foreach (var part in parts[self.Name])
+        foreach (var f in part.Functions)
+            targets[f.Start] = $"{part.Class}.{f.EmittedName}";
+
+        return targets;
+    }
+
+    private static bool Overlaps(OverlayResult a, OverlayResult b)
+    {
+        if (a.Size == 0 || b.Size == 0) return true; //unknown range, assume the worst
+        uint sa = a.Base & 0x1FFFFFFFu, sb = b.Base & 0x1FFFFFFFu;
+        return sa < sb + b.Size && sb < sa + a.Size;
+    }
+
+    //where an image's .cs goes (null: straight into the output folder)
+    private static Func<string, string>? ImageDir;
 
     private static string Owner(Dictionary<uint, string> funcClass, uint address, string fallback)
     {
@@ -323,7 +392,7 @@ public static class OverlayWriter
     private sealed record OverlayPart(string Class, List<MipsFunction> Functions);
 
     private static void EmitOverlayFile(string overlayName, List<OverlayPart> parts,
-        Dictionary<uint, string> knownFuncs, bool debug, bool addressComments,
+        Dictionary<uint, string> knownFuncs, DiscImage? source, bool embed, bool debug, bool addressComments,
         bool disasmComments, int lbaStart, uint ovlBase, uint ovlSize, MipsInstruction[] instrs, string outDir,
         Dictionary<uint, uint> relocations)
     {
@@ -378,6 +447,42 @@ public static class OverlayWriter
         sb.AppendLine($"    public int LbaStart => {lbaStart};");
         sb.AppendLine($"    public uint Base => 0x{ovlBase:X8}u;");
         sb.AppendLine($"    public uint Size => 0x{ovlSize:X}u;");
+
+        //the bytes this code was recompiled from, the runtime compares ram against them before running it
+        if (ovlBase != 0 && ovlSize != 0 && instrs.Length > 0 && instrs[0].Vram == ovlBase)
+        {
+            var image = new byte[Math.Min(ovlSize, (uint)instrs.Length * 4)];
+            for (var i = 0; i < image.Length / 4; i++)
+                BitConverter.TryWriteBytes(image.AsSpan(i * 4), instrs[i].Word);
+
+            //start/end of every function, so only the bytes a function was built from get checked
+            var ranges = new SortedDictionary<uint, uint>();
+            foreach (var f in funcs.Where(f => !f.IsStub && f.End > f.Start))
+            {
+                var e = Math.Min(f.End, ovlBase + (uint)image.Length);
+                if (f.Start < ovlBase || e <= f.Start) continue;
+                ranges[f.Start] = ranges.TryGetValue(f.Start, out var prev) ? Math.Max(prev, e) : e;
+            }
+
+            if (!embed && source != null)
+            {
+                var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(image));
+                var archive = source.Archive == null ? "null" : $"\"{source.Archive}\"";
+                sb.AppendLine($"    public ImageSource? Source => new(\"{source.File.Replace("\\", "\\\\")}\", {archive}, {source.Entry}, " +
+                              $"0x{source.Skip:X}, 0x{image.Length:X}, \"{sha}\");");
+            }
+            else
+            {
+                if (!embed)
+                    Console.WriteLine($"[Recompiler] WARNING: {overlayName}: its bytes do not come straight from a disc file, " +
+                                      "embedding them although embedImages is false");
+                sb.AppendLine("    private static byte[]? _image;");
+                sb.AppendLine($"    public byte[]? Image => _image ??= System.Convert.FromBase64String(\"{Convert.ToBase64String(image)}\");");
+            }
+            sb.Append("    public uint[] FunctionRanges { get; } = [");
+            sb.Append(string.Join(", ", ranges.Select(r => $"0x{r.Key:X8}u, 0x{r.Value:X8}u")));
+            sb.AppendLine("];");
+        }
         sb.AppendLine("    public IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> Functions { get; } =");
         sb.AppendLine("        new Dictionary<uint, Action<CpuContext, IMemory>>");
         sb.AppendLine("        {");
@@ -387,7 +492,7 @@ public static class OverlayWriter
         sb.AppendLine("        };");
         sb.AppendLine("}");
 
-        File.WriteAllText(Path.Combine(outDir, $"{overlayName}.cs"), sb.ToString());
+        File.WriteAllText(Path.Combine(ImageDir?.Invoke(overlayName) ?? outDir, $"{overlayName}.cs"), sb.ToString());
     }
 
     private static string DispatchTableName(string name)
@@ -417,38 +522,92 @@ public static class OverlayWriter
         return Regex.Replace(s, @"[^A-Za-z0-9_]", "_");
     }
 
-    private static (byte[]? data, int lba) ResolveOverlay(DiscFs fs, OverlayConfig cfg)
+    private static readonly byte[] PsxExeMagic = "PS-X EXE"u8.ToArray();
+
+    public readonly record struct ExeInfo(uint Pc, uint TAddr, uint TSize);
+
+    private static (byte[]? data, int lba, ExeInfo? exe, DiscImage? image) ResolveOverlay(DiscFs fs, OverlayConfig cfg)
     {
         try
         {
             if (cfg.Lba >= 0)
             {
                 var sz = cfg.Size ?? throw new InvalidOperationException($"'size' is required when using 'lba' for overlay '{cfg.Name}'");
-                return (Unpack(fs.ReadSectors(cfg.Lba, sz), cfg), cfg.Lba);
+                return (Unpack(fs.ReadSectors(cfg.Lba, sz), cfg), cfg.Lba, null, null);
             }
 
-            if (cfg.File != null)
+            byte[] full;
+            var lba = -1;
+            string source;
+            if (cfg.LocalFile != null)
             {
-                if (!fs.Locate(cfg.File, out var lba, out var fileSize))
+                if (!File.Exists(cfg.LocalFile))
                 {
-                    Console.WriteLine($"[Recompiler] WARNING: disc file not found: {cfg.File}");
-                    return (null, -1);
+                    Console.WriteLine($"[Recompiler] WARNING: local file not found: {cfg.LocalFile}");
+                    return (null, -1, null, null);
                 }
 
-                var absLba = lba + (cfg.Offset + cfg.Skip) / 2048;
-                var full = fs.ReadFile(cfg.File);
-                var start = cfg.Offset + cfg.Skip;
-                var length = cfg.Size ?? full.Length - start;
-                return (Unpack(full.AsSpan(start, length).ToArray(), cfg), absLba);
+                full = File.ReadAllBytes(cfg.LocalFile);
+                source = cfg.LocalFile;
+            }
+            else if (cfg.File != null)
+            {
+                if (!fs.Locate(cfg.File, out lba, out _))
+                {
+                    Console.WriteLine($"[Recompiler] WARNING: disc file not found: {cfg.File}");
+                    return (null, -1, null, null);
+                }
+
+                full = fs.ReadFile(cfg.File);
+                source = cfg.File;
+            }
+            else
+            {
+                Console.WriteLine($"[Recompiler] WARNING: overlay '{cfg.Name}' has no 'file', 'localFile' or 'lba' source defined");
+                return (null, -1, null, null);
             }
 
-            Console.WriteLine($"[Recompiler] WARNING: overlay '{cfg.Name}' has no 'file' or 'lba' source defined");
-            return (null, -1);
+            //an archive entry is not at a fixed sector of its own, so it cant be tracked by lba, the runtime
+            //switches to it by checking the ram contents instead
+            if (cfg.Archive != null)
+            {
+                full = Psx.Compression.Archives.Extract(cfg.Archive, full, cfg.Entry, cfg.Name);
+                source = $"{source} [{cfg.Archive} entry {cfg.Entry}]";
+                lba = -1;
+            }
+
+            var skip = cfg.Skip;
+            int? exeTextSize = null;
+            ExeInfo? exe = null;
+
+            //a PS-X EXE carries a 0x800 header, the code starts after it, without skipping it every
+            //instruction ends up analyzed 0x800 above the address it really runs at
+            if (cfg.Offset == 0 && skip == 0 && full.Length >= 0x800 && full.AsSpan(0, 8).SequenceEqual(PsxExeMagic))
+            {
+                skip = 0x800;
+                var pc = BitConverter.ToUInt32(full, 0x10);
+                var tAddr = BitConverter.ToUInt32(full, 0x18);
+                var tSize = BitConverter.ToUInt32(full, 0x1C);
+                if (tSize > 0 && tSize <= full.Length - 0x800) exeTextSize = (int)tSize;
+                exe = new ExeInfo(pc, tAddr, tSize);
+                Console.WriteLine($"[Recompiler] '{cfg.Name}': {source} is a PS-X EXE, skipping its 0x800 header (pc=0x{pc:X8} t_addr=0x{tAddr:X8} t_size=0x{tSize:X})");
+                if (cfg.Base != null && Convert.ToUInt32(cfg.Base, 16) + (uint)cfg.Rebase != tAddr)
+                    Console.WriteLine($"[Recompiler] WARNING: '{cfg.Name}' base {cfg.Base} does not match the EXE load address 0x{tAddr:X8}");
+            }
+
+            var absLba = lba < 0 ? -1 : lba + (cfg.Offset + skip) / 2048;
+            var start = cfg.Offset + skip;
+            var length = cfg.Size ?? exeTextSize ?? full.Length - start;
+            var slice = full.AsSpan(start, length).ToArray();
+            var data = Unpack(slice, cfg);
+            //the runtime can read it back from the disc only when nothing but the archive unpacking touched it
+            var plain = cfg.LocalFile == null && cfg.Compression == null && ReferenceEquals(data, slice);
+            return (data, absLba, exe, plain ? new DiscImage(cfg.File!, cfg.Archive, cfg.Entry, start) : null);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Recompiler] WARNING: failed to resolve disc data for '{cfg.Name}': {ex.Message}");
-            return (null, -1);
+            return (null, -1, null, null);
         }
     }
 

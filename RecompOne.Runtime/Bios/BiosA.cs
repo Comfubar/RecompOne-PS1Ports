@@ -708,6 +708,32 @@ public static class BiosA
         return hdr;
     }
 
+    //the game built this exe in ram (unpacked it from an archive) and nothing recompiled covers it, save it as a
+    //PS-X EXE so it can be fed to the recompiler as an overlay
+    private static void DumpExec(IMemory m, uint hdr, uint pc0)
+    {
+        try
+        {
+            var tAddr = m.ReadU32(hdr + 0x08u);
+            var tSize = m.ReadU32(hdr + 0x0Cu);
+            if (tSize == 0u || tSize > 0x200000u) return;
+
+            var image = new byte[0x800 + tSize];
+            "PS-X EXE"u8.CopyTo(image);
+            for (uint i = 0; i < 40u; i++) image[0x10 + i] = m.ReadU8(hdr + i);
+            for (uint i = 0; i < tSize; i++) image[0x800 + i] = m.ReadU8(tAddr + i);
+
+            Directory.CreateDirectory("dumps");
+            var path = Path.GetFullPath(Path.Combine("dumps", $"exec_{pc0:X8}.exe"));
+            File.WriteAllBytes(path, image);
+            Console.WriteLine($"[Bios] Exec pc=0x{pc0:X8} t_addr=0x{tAddr:X8} t_size=0x{tSize:X} has no recompiled code, image saved to {path}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Bios] Exec image dump failed: {e.Message}");
+        }
+    }
+
     private static uint DoExec(CpuContext c, IMemory m, uint hdr, uint argc, uint argv)
     {
         var pc0 = m.ReadU32(hdr + 0x00u);
@@ -717,6 +743,8 @@ public static class BiosA
         var bSize = m.ReadU32(hdr + 0x1Cu);
         var sAddr = m.ReadU32(hdr + 0x20u);
         var sSize = m.ReadU32(hdr + 0x24u);
+
+        if (!Dispatcher.CanCall(pc0) && !Dispatcher.ActivateAt(pc0, m, "Exec")) DumpExec(m, hdr, pc0);
 
         for (uint i = 0; i < bSize; i++) m.WriteU8(bAddr + i, 0);
 
