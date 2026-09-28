@@ -87,7 +87,7 @@ internal sealed class InputSettingsSection : ISettingsSection
             if (!_gamepadMode)
             {
                 if (_padIndex == 0) ConfigManager.Game.Keys = new KeyBindings();
-                else ConfigManager.Game.Keys2 = KeyBindings.Empty();
+                else ConfigManager.Game.Keys2 = KeyBindings.DefaultPlayer2();
             }
             else
             {

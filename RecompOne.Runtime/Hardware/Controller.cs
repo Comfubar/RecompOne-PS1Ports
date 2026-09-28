@@ -48,6 +48,9 @@ public static class Controller
     public const int SlotCount = 8;
     public static readonly PadSlot[] Slots = NewSlots();
 
+    //the DualShock state of each slot (mode, config mode, motors), see DualShock
+    public static readonly DualShock[] Pads = Enumerable.Range(0, SlotCount).Select(i => new DualShock(i)).ToArray();
+
     //a multitap is plugged into port 1 / port 2
     public static bool Multitap1;
     public static bool Multitap2;

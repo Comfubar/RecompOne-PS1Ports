@@ -35,6 +35,11 @@ public sealed class GlCore : IGpuBackend
     private int _presentW, _presentH;
     private bool _presentNearest;
 
+    //what the last PresentDisplay drew into the present texture, for ReadPresented
+    private int _shownW1x, _shownH1x, _shownFbW, _shownFbH;
+    private uint _capFbo, _capTex;
+    private int _capW, _capH;
+
     private uint _postProg, _postFbo, _postTex;
     private int _postW, _postH, _postVersion = -1;
     private int _uPostTexSize, _uPostOutputSize, _uPostTime, _uPostFrame;
@@ -1066,6 +1071,11 @@ public sealed class GlCore : IGpuBackend
 
         _gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
+        _shownW1x = w1x;
+        _shownH1x = h1x;
+        _shownFbW = fbW;
+        _shownFbH = fbH;
+
         var outTex = ApplyPostFx(_presentTex, fbW, fbH);
 
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
@@ -1172,6 +1182,56 @@ public sealed class GlCore : IGpuBackend
         return true;
     }
 
+    //the image the last PresentDisplay showed (before post-fx), at 1x resolution, RGBA top row first. Called on the GL
+    //thread right after PresentDisplay, so it is exactly the frame the window gets and never a buffer the game is still
+    //drawing or has just cleared
+    public unsafe byte[]? ReadPresented(out int w, out int h)
+    {
+        w = _shownW1x;
+        h = _shownH1x;
+        if (!Ready || w <= 0 || h <= 0 || _shownFbW <= 0) return null;
+
+        if (_capFbo == 0)
+        {
+            _capTex = _gl.GenTexture();
+            _capFbo = _gl.GenFramebuffer();
+        }
+
+        if (w != _capW || h != _capH)
+        {
+            _gl.BindTexture(TextureTarget.Texture2D, _capTex);
+            _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)w, (uint)h, 0, PixelFormat.Rgba,
+                PixelType.UnsignedByte, null);
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _capFbo);
+            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D, _capTex, 0);
+            _capW = w;
+            _capH = h;
+        }
+
+        //scale the (possibly upscaled) present texture down to 1x with nearest sampling
+        _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _presentFbo);
+        _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _capFbo);
+        _gl.BlitFramebuffer(0, 0, _shownFbW, _shownFbH, 0, 0, w, h, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+
+        var px = new byte[w * h * 4];
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _capFbo);
+        _gl.PixelStore(PixelStoreParameter.PackAlignment, 1);
+        fixed (byte* p = px) _gl.ReadPixels(0, 0, (uint)w, (uint)h, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+        //the present pass stores the display's top row first, the same order ReadPixels returns
+        for (var i = 3; i < px.Length; i += 4) px[i] = 255;
+        return px;
+    }
+
+    //vram + the shown frame for FrameDiagnostics; runs after PresentDisplay (see HostWindow.OnRender)
+    public void RunPresentedDiagnostics(int dispX, int dispY, int w, int h, bool rgb24, bool displayOn, bool hle)
+    {
+        if (!Ready || !FrameDiagnostics.Enabled) return;
+        FrameDiagnostics.OnHostFrame(_vram, dispX, dispY, w, h, rgb24, displayOn, hle, this);
+    }
+
     private unsafe void EnsurePresentSize(int w, int h, bool nearest)
     {
         if (w == _presentW && h == _presentH && nearest == _presentNearest) return;
@@ -1202,5 +1262,7 @@ public sealed class GlCore : IGpuBackend
         if (_postProg != 0) _gl.DeleteProgram(_postProg);
         if (_postTex != 0) _gl.DeleteTexture(_postTex);
         if (_postFbo != 0) _gl.DeleteFramebuffer(_postFbo);
+        if (_capTex != 0) _gl.DeleteTexture(_capTex);
+        if (_capFbo != 0) _gl.DeleteFramebuffer(_capFbo);
     }
 }

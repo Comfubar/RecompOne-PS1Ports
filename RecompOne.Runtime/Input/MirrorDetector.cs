@@ -3,12 +3,14 @@ namespace RecompOne.Runtime.Input;
 //finds a controller that is the same physical pad as another one. Pad remappers (DualSenseX, DS4Windows, Steam Input)
 //expose a PlayStation pad as a virtual Xbox pad; when the real pad stays visible too, SDL opens both and one pad
 //drives two players. Every button change of a mirror shows up on its twin within a few polls, and a real second pad
-//does not do that: after MatchesNeeded matching presses and no press that only one of them saw, the later player
-//is reported as the mirror.
+//does not do that: after MatchesNeeded matching presses of at least DistinctNeeded different buttons, and no press
+//that only one of them saw, the later player is reported as the mirror. Needing different buttons keeps players who
+//happen to hit the same button together (everyone confirming at once) from looking like one pad.
 public sealed class MirrorDetector
 {
     public const int Window = 3;
-    public const int MatchesNeeded = 3;
+    public const int MatchesNeeded = 5;
+    public const int DistinctNeeded = 2;
 
     private readonly int _players;
     private readonly uint[] _last;
@@ -23,6 +25,7 @@ public sealed class MirrorDetector
     private readonly List<Change> _changes = [];
     private readonly int[,] _matches;
     private readonly int[,] _misses;
+    private readonly HashSet<uint>[,] _matchedMasks;
     private long _poll;
 
     public MirrorDetector(int players)
@@ -31,6 +34,10 @@ public sealed class MirrorDetector
         _last = new uint[players];
         _matches = new int[players, players];
         _misses = new int[players, players];
+        _matchedMasks = new HashSet<uint>[players, players];
+        for (var a = 0; a < players; a++)
+        for (var b = 0; b < players; b++)
+            _matchedMasks[a, b] = [];
     }
 
     public void Reset()
@@ -39,6 +46,7 @@ public sealed class MirrorDetector
         _changes.Clear();
         Array.Clear(_matches);
         Array.Clear(_misses);
+        foreach (var set in _matchedMasks) set.Clear();
         _poll = 0;
     }
 
@@ -63,7 +71,11 @@ public sealed class MirrorDetector
             {
                 if (q == c.Player || !open[q]) continue;
                 var seen = _changes.Any(o => o.Player == q && o.Mask == c.Mask && Math.Abs(o.Poll - c.Poll) <= Window);
-                if (seen) _matches[c.Player, q]++;
+                if (seen)
+                {
+                    _matches[c.Player, q]++;
+                    _matchedMasks[Math.Min(c.Player, q), Math.Max(c.Player, q)].Add(c.Mask);
+                }
                 else _misses[c.Player, q]++;
             }
         }
@@ -75,7 +87,8 @@ public sealed class MirrorDetector
         {
             if (!open[a] || !open[b]) continue;
             var matched = Math.Min(_matches[a, b], _matches[b, a]);
-            if (matched >= MatchesNeeded && _misses[a, b] == 0 && _misses[b, a] == 0) return b;
+            if (matched >= MatchesNeeded && _matchedMasks[a, b].Count >= DistinctNeeded &&
+                _misses[a, b] == 0 && _misses[b, a] == 0) return b;
         }
 
         return -1;

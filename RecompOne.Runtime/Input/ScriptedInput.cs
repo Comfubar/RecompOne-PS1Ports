@@ -34,10 +34,25 @@ public static class ScriptedInput
 
     private static readonly List<Entry> _entries = Parse(TestScript.PadLines);
 
-    //a line from the live script (TestScript), already given an absolute time
-    public static void Add(string line)
+    //a line without a time from a sequential script step (TestScript), starts now; returns a handle for FinishedFor
+    public static object AddNow(string line)
     {
-        _entries.AddRange(Parse([line]));
+        var now = _clock.Elapsed.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
+        var added = Parse([$"{now}s {line}"]);
+        _entries.AddRange(added);
+        Evaluate(force: true);
+        return added[0];
+    }
+
+    //true once the entry has started and its hold ended at least gapSeconds ago
+    public static bool FinishedFor(object handle, double gapSeconds)
+    {
+        var e = (Entry)handle;
+        if (e.StartedAt < 0) return false;
+        if (e.Slot < 0) return true;
+        var now = _clock.Elapsed.TotalSeconds;
+        if (e.Ms >= 0) return (now - e.StartedSec) * 1000 >= e.Ms + gapSeconds * 1000;
+        return TestScript.Frame - e.StartedAt >= e.Frames && now - e.StartedSec >= gapSeconds;
     }
     private static readonly bool[] _plugged = new bool[Controller.SlotCount];
     private static readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
@@ -139,10 +154,10 @@ public static class ScriptedInput
     }
 
     //starts entries that are due, once per game frame
-    private static void Evaluate()
+    private static void Evaluate(bool force = false)
     {
         var frame = TestScript.Frame;
-        if (frame == _evaluatedFrame) return;
+        if (frame == _evaluatedFrame && !force) return;
         _evaluatedFrame = frame;
         var now = _clock.Elapsed.TotalSeconds;
 

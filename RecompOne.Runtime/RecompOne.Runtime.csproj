@@ -22,6 +22,13 @@
         <EmbeddedResource Include="Host\Window\Assets\languages.json"/>
     </ItemGroup>
 
+    <!-- the community controller mapping database (SDL_GameControllerDB, zlib license: gamecontrollerdb.LICENSE.txt),
+         copied next to the executable and loaded at startup -->
+    <ItemGroup>
+        <None Include="Host\Input\gamecontrollerdb.txt" Link="gamecontrollerdb.txt" CopyToOutputDirectory="PreserveNewest"/>
+        <None Include="Host\Input\gamecontrollerdb.LICENSE.txt" Link="gamecontrollerdb.LICENSE.txt" CopyToOutputDirectory="PreserveNewest"/>
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0"/>
         <PackageReference Include="MonoMod.RuntimeDetour" Version="25.3.6"/>

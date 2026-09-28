@@ -28,12 +28,17 @@ public static class ConfigManager
     //settings and memory cards live next to the executable, wherever it is started from. A relative path is taken
     //from the executable's folder; older builds kept these files in the working directory, so one found only there
     //is copied over the first time.
+    //RECOMPONE_DATA_DIR (tests) puts them in another folder, so a test run starts from fresh settings and cards
+    public static string DataDir => Environment.GetEnvironmentVariable("RECOMPONE_DATA_DIR") is { Length: > 0 } d
+        ? Path.GetFullPath(d)
+        : AppContext.BaseDirectory;
+
     public static string DataPath(string path)
     {
         if (Path.IsPathRooted(path)) return path;
-        var full = Path.Combine(AppContext.BaseDirectory, path);
+        var full = Path.Combine(DataDir, path);
         var old = Path.GetFullPath(path);
-        if (!File.Exists(full) && File.Exists(old) &&
+        if (Environment.GetEnvironmentVariable("RECOMPONE_DATA_DIR") is not { Length: > 0 } && !File.Exists(full) && File.Exists(old) &&
             !string.Equals(full, old, StringComparison.OrdinalIgnoreCase))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);

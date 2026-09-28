@@ -19,6 +19,19 @@ public class KeyBindings
     public string Left { get; set; } = "Left";
     public string Right { get; set; } = "Right";
 
+    //a second layout on the other side of the keyboard, for a player 2 on the same keyboard (not on by default: a
+    //keyboard player counts as a connected pad, see GameConfig.Keys2)
+    public static KeyBindings DefaultPlayer2()
+    {
+        return new KeyBindings
+        {
+            Cross = "K", Circle = "L", Square = "J", Triangle = "I",
+            L1 = "U", R1 = "O", L2 = "Number7", R2 = "Number9",
+            L3 = "Number8", R3 = "Number0", Start = "Backspace", Select = "Backslash",
+            Up = "Keypad8", Down = "Keypad5", Left = "Keypad4", Right = "Keypad6"
+        };
+    }
+
     public static KeyBindings Empty()
     {
         return new KeyBindings
@@ -101,6 +114,8 @@ public class GameConfig
     public float XaVolume { get; set; } = 1.0f;
     public bool Muted { get; set; } = false;
     public KeyBindings Keys { get; set; } = new();
+    //player 2 on the keyboard: empty by default, because a player with keys counts as a connected pad in port 2 (which
+    //would hide the game's own "controller removed" handling for a player 2 pad); KeyBindings.DefaultPlayer2 fills it
     public KeyBindings Keys2 { get; set; } = KeyBindings.Empty();
     //players 1-4. The buttons use SDL's positional names (south = A on Xbox = Cross on PlayStation), so the same
     //defaults fit Xbox, PlayStation and Nintendo pads
@@ -122,6 +137,15 @@ public class GameConfig
     public PadKind PadKind4 { get; set; } = PadKind.Digital;
 
     public MultitapMode Multitap { get; set; } = MultitapMode.Auto;
+
+    //the game's DualShock motor commands are passed on to the player's pad (the game's own VIBRATION option decides
+    //whether it sends any); off = never rumble. Strength scales both motors.
+    public bool Vibration { get; set; } = true;
+    public float VibrationStrength { get; set; } = 1.0f;
+
+    //PlayStation 4/5 pads over Bluetooth only rumble in SDL's extended report mode, which stays on until the pad is
+    //powered off and confuses other programs reading it through DirectInput; off by default, USB is not affected
+    public bool PlayStationBluetoothRumble { get; set; } = false;
 
     //0..1 of the stick range that counts as centred, for the analog values and for sticks bound to buttons
     public float StickDeadzone { get; set; } = 0.20f;

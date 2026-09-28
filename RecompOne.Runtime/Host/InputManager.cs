@@ -79,17 +79,83 @@ internal static unsafe class InputManager
         try
         {
             _sdl = Sdl.GetApi();
+            //Windows backends: XInput (Xbox and XInput pads), HIDAPI (PlayStation 4/5 and Switch pads, USB and
+            //Bluetooth, no DualSenseX/DS4Windows needed), DirectInput (generic pads), Windows.Gaming.Input.
+            //RawInput is off: with it SDL hands XInput pads to its RawInput driver instead
             _sdl.SetHint("SDL_JOYSTICK_RAWINPUT", "0");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI", "1");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", "1");
+            //extended reports (needed for rumble on Bluetooth PlayStation pads) are only switched on when a rumble
+            //actually goes to such a pad and the player allowed it (PlayStationBluetoothRumble): once on, the pad
+            //keeps them until it is powered off and other programs that read it through DirectInput misbehave
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "0");
+            _sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "0");
             //bind by position, not by printed label, so south is Cross on every pad (SDL swaps A/B on Nintendo pads
             //by default)
             _sdl.SetHint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
-            _sdl.InitSubSystem(Sdl.InitGamecontroller);
+            if (_sdl.InitSubSystem(Sdl.InitGamecontroller) != 0)
+                throw new InvalidOperationException(_sdl.GetErrorS());
+            SdlVersion();
+            LoadMappings();
             Rescan();
         }
-        catch
+        catch (Exception e)
         {
+            //the game still runs with the keyboard; the reason is in the log
+            Console.WriteLine($"[Input] controllers unavailable, SDL could not start: {e.GetType().Name}: {e.Message}");
             _sdl = null;
         }
+    }
+
+    private static void SdlVersion()
+    {
+        Silk.NET.SDL.Version v;
+        _sdl!.GetVersion(&v);
+        Console.WriteLine($"[Input] SDL {v.Major}.{v.Minor}.{v.Patch}: XInput, HIDAPI (PS4, PS5, Switch, Joy-Con), " +
+                          "DirectInput and Windows.Gaming.Input; RawInput off");
+    }
+
+    //the community mapping database next to the executable (SDL_GameControllerDB, see its license file), then the
+    //player's own mappings (written by "map this controller"), which win for the same controller
+    public const string MappingFile = "gamecontrollerdb.txt";
+    public const string UserMappingFile = "gamecontrollerdb.user.txt";
+
+    private static void LoadMappings()
+    {
+        foreach (var path in new[]
+                 {
+                     Path.Combine(AppContext.BaseDirectory, MappingFile), ConfigManager.DataPath(UserMappingFile)
+                 })
+        {
+            if (!File.Exists(path)) continue;
+            var n = AddMappings(path);
+            Console.WriteLine($"[Input] {n} controller mapping(s) from {Path.GetFileName(path)}");
+        }
+    }
+
+    //the lines for this platform, as SDL_GameControllerAddMappingsFromFile would take them; returns how many were used
+    public static int AddMappings(string path)
+    {
+        if (_sdl == null) return 0;
+        var n = 0;
+        var line = 0;
+        foreach (var raw in File.ReadLines(path))
+        {
+            line++;
+            var m = raw.Trim();
+            if (m.Length == 0 || m.StartsWith('#')) continue;
+            if (m.Contains("platform:", StringComparison.Ordinal) && !m.Contains("platform:Windows,", StringComparison.Ordinal))
+                continue;
+            if (_sdl.GameControllerAddMapping(m) < 0)
+                Console.WriteLine($"[Input] {Path.GetFileName(path)}:{line}: mapping not accepted: {_sdl.GetErrorS()}");
+            else n++;
+        }
+
+        return n;
     }
 
     public static bool IsConnected => _pads[0] != 0;
@@ -101,11 +167,55 @@ internal static unsafe class InputManager
 
     public static bool IsKeyDown(Key k)
     {
-        return _keyboard?.IsKeyPressed(k) ?? false;
+        return (_keyboard?.IsKeyPressed(k) ?? false) || SyntheticDown(k);
+    }
+
+    //test hooks (TestScript "key"/"vpad"), off unless a script uses them: work for the thread that owns SDL and the
+    //window, run at the start of the next Poll
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<Action<Sdl?>> _hostJobs = new();
+    private static readonly HashSet<Key> _synthKeys = [];
+
+    public static void RunOnInputThread(Action<Sdl?> job) => _hostJobs.Enqueue(job);
+
+    private static bool SyntheticDown(Key k)
+    {
+        lock (_synthKeys) return _synthKeys.Count > 0 && _synthKeys.Contains(k);
+    }
+
+    //a key event fed into the same handlers the window's keyboard uses
+    public static void SyntheticKey(Key k, bool down)
+    {
+        _hostJobs.Enqueue(_ =>
+        {
+            lock (_synthKeys)
+            {
+                if (down) _synthKeys.Add(k);
+                else _synthKeys.Remove(k);
+            }
+
+            if (_keyboard == null) return;
+            if (down) OnKeyDown(_keyboard, k, 0);
+            else OnKeyUp(_keyboard, k, 0);
+        });
+    }
+
+    private static void RunHostJobs()
+    {
+        while (_hostJobs.TryDequeue(out var job))
+            try
+            {
+                job(_sdl);
+            }
+            catch (Exception e)
+            {
+                //a failed test hook fails the script step that queued it
+                Diagnostics.TestScript.ReportHookError(e);
+            }
     }
 
     public static void Poll()
     {
+        RunHostJobs();
         PollGamepadEvents();
         CheckMirrors();
 
@@ -172,6 +282,8 @@ internal static unsafe class InputManager
         Controller.LeftY = slots[0].LeftY;
         Controller.RightX = slots[0].RightX;
         Controller.RightY = slots[0].RightY;
+        ApplyRumble();
+
         Controller.State2 = slots[4].Buttons;
         Controller.Connected2 = slots[4].Connected;
         Controller.Analog2 = slots[4].Analog;
@@ -273,8 +385,8 @@ internal static unsafe class InputManager
         var anyCtrl = EventBus.HasAnyListeners<ControllerEvent>();
         while (_sdl.PollEvent(&ev) != 0)
         {
-            if (ev.Type == (uint)EventType.Controllerdeviceadded) changed = true;
-            if (ev.Type == (uint)EventType.Controllerdeviceremoved) changed = true;
+            if (ev.Type is (uint)EventType.Controllerdeviceadded or (uint)EventType.Controllerdeviceremoved
+                or (uint)EventType.Joydeviceadded or (uint)EventType.Joydeviceremoved) changed = true;
             if (!anyCtrl) continue;
             if (ev.Type == (uint)EventType.Controllerbuttondown || ev.Type == (uint)EventType.Controllerbuttonup)
                 EventBus.Dispatch(new ControllerEvent
@@ -346,6 +458,80 @@ internal static unsafe class InputManager
         return string.IsNullOrWhiteSpace(name) ? $"Controller {joystickIndex}" : name;
     }
 
+    private static readonly HashSet<string> _generic = [];
+
+    //a pad neither SDL nor the mapping files know: it gets a generic layout (the usual DirectInput order) so it works
+    //right away, and the player is told to map it in the launcher ("map this controller"). False when it cannot.
+    private static bool AddGenericMapping(int index)
+    {
+        if (_sdl == null) return false;
+        var guid = DeviceId(index);
+        var name = _sdl.JoystickNameForIndexS(index) ?? "Controller";
+        var joy = _sdl.JoystickOpen(index);
+        if (joy == null) return false;
+        int buttons = _sdl.JoystickNumButtons(joy), axes = _sdl.JoystickNumAxes(joy), hats = _sdl.JoystickNumHats(joy);
+        _sdl.JoystickClose(joy);
+        if (buttons < 4) return false;
+
+        var parts = new List<string> { guid, name.Replace(",", " "), "platform:Windows" };
+        string[] order = ["x", "a", "b", "y", "leftshoulder", "rightshoulder", "lefttrigger", "righttrigger", "back",
+            "start", "leftstick", "rightstick"];
+        for (var b = 0; b < Math.Min(buttons, order.Length); b++) parts.Add($"{order[b]}:b{b}");
+        if (hats > 0) parts.AddRange(["dpup:h0.1", "dpright:h0.2", "dpdown:h0.4", "dpleft:h0.8"]);
+        if (axes >= 2) parts.AddRange(["leftx:a0", "lefty:a1"]);
+        if (axes >= 4) parts.AddRange(["rightx:a2", "righty:a3"]);
+        var mapping = string.Join(",", parts) + ",";
+        if (_sdl.GameControllerAddMapping(mapping) < 0) return false;
+        if (_generic.Add(guid))
+            Console.WriteLine($"[Input] '{name}' ({guid}) has no known mapping: using a generic layout ({buttons} buttons, " +
+                              $"{axes} axes, {hats} hat(s)). If buttons are wrong, map it in the launcher " +
+                              "(Controllers > Map this controller).");
+        return _sdl.IsGameController(index) == SdlBool.True;
+    }
+
+    public static bool IsGenericMapping(string guid) => _generic.Contains(guid);
+
+    //SDL's GUID starts with the bus type (little endian): 03h USB, 05h Bluetooth, FFh virtual
+    public static string Connection(string guid)
+    {
+        if (guid.Length < 4) return "";
+        return guid[..4].ToLowerInvariant() switch
+        {
+            "0300" => "USB",
+            "0500" => "Bluetooth",
+            "ff00" => "virtual",
+            _ => ""
+        };
+    }
+
+    //the family of a player's pad, for labels and rumble rules
+    public static string Family(int player)
+    {
+        if (_sdl == null || _pads[player] == 0) return "";
+        return FamilyName(_sdl.GameControllerGetType(Pad(player)));
+    }
+
+    public static string FamilyName(GameControllerType t)
+    {
+        return t switch
+        {
+            GameControllerType.Xbox360 => "Xbox 360",
+            GameControllerType.Xboxone => "Xbox One/Series",
+            GameControllerType.PS3 => "PlayStation 3",
+            GameControllerType.PS4 => "PlayStation 4",
+            GameControllerType.PS5 => "PlayStation 5",
+            GameControllerType.NintendoSwitchPro => "Nintendo Switch Pro",
+            GameControllerType.NintendoSwitchJoyconLeft or GameControllerType.NintendoSwitchJoyconRight
+                or GameControllerType.NintendoSwitchJoyconPair => "Nintendo Joy-Con",
+            GameControllerType.Virtual => "virtual",
+            _ => "generic"
+        };
+    }
+
+    public static string PlayerConnection(int player) => _pads[player] == 0 ? "" : Connection(_padIds[player]);
+
+    private static readonly bool VirtualOnly = Environment.GetEnvironmentVariable("RECOMPONE_VIRTUAL_PADS_ONLY") == "1";
+
     private static void Rescan()
     {
         if (_sdl == null) return;
@@ -355,10 +541,12 @@ internal static unsafe class InputManager
         var n = _sdl.NumJoysticks();
         for (var i = 0; i < n; i++)
         {
-            if (_sdl.IsGameController(i) != SdlBool.True) continue;
+            if (_sdl.IsGameController(i) != SdlBool.True && !AddGenericMapping(i)) continue;
             var id = DeviceId(i);
             var name = DeviceName(i);
             if (_sessionIgnored.Contains(id)) continue;
+            //tests: only the SDL virtual pads (their GUID has 'v' in byte 14), real pads on the test machine stay out
+            if (VirtualOnly && !(id.Length == 32 && id.Substring(28, 2) == "76")) continue;
             if (ConfigManager.Game.IgnoredPads.Any(x => x.Length > 0 &&
                     (string.Equals(x, id, StringComparison.OrdinalIgnoreCase) ||
                      name.Contains(x, StringComparison.OrdinalIgnoreCase))))
@@ -385,7 +573,9 @@ internal static unsafe class InputManager
             _padIds[p] = _pads[p] == 0 ? "" : IdOf(p);
         _mirrors.Reset();
 
-        var summary = string.Join(", ", Enumerable.Range(0, _pads.Length).Select(p => $"P{p + 1}={PadName(p)}"));
+        var summary = string.Join(", ", Enumerable.Range(0, _pads.Length).Select(p => _pads[p] == 0
+            ? $"P{p + 1}=-"
+            : $"P{p + 1}={PadName(p)} [{Family(p)}{(PlayerConnection(p) is { Length: > 0 } c ? ", " + c : "")}]"));
         Console.WriteLine($"[Input] controllers: {found.Count} usable, {summary}");
     }
 
@@ -454,7 +644,7 @@ internal static unsafe class InputManager
 
         void B(string keyName, ushort bit)
         {
-            if (Enum.TryParse<Key>(keyName, out var k) && kb.IsKeyPressed(k))
+            if (Enum.TryParse<Key>(keyName, out var k) && (kb.IsKeyPressed(k) || SyntheticDown(k)))
                 s &= (ushort)~bit;
         }
 
@@ -550,6 +740,53 @@ internal static unsafe class InputManager
         raw = mag <= dz ? 0f : Math.Sign(raw) * (mag - dz) / (1f - dz);
         var f = Math.Clamp(raw * 1.3f, -1.0f, 1.0f);
         return (byte)Math.Clamp((int)MathF.Round((f + 1.0f) * 127.5f), 0, 255);
+    }
+
+    //what each player's pad was last told to do, so SDL is only called on a change or to keep a running motor going
+    private static readonly (ushort Low, ushort High, long At)[] _rumble = new (ushort, ushort, long)[GameConfig.MaxPlayers];
+
+    //the motors of the DualShock in each player's slot go to that player's pad. A pad the game stopped polling is
+    //treated as stopped, like a real DualShock, so a loading screen never leaves a motor running.
+    private static void ApplyRumble()
+    {
+        if (_sdl == null) return;
+        var cfg = ConfigManager.Game;
+        var now = Environment.TickCount64;
+        for (var p = 0; p < _pads.Length; p++)
+        {
+            if (_pads[p] == 0 || _playerSlot[p] < 0) continue;
+            var ds = Controller.Pads[_playerSlot[p]];
+            var live = now - ds.LastPollTicks < 250;
+            if (live && (ds.SmallMotor != 0 || ds.LargeMotor != 0) && !RumbleAllowed(p)) continue;
+            var strength = Math.Clamp(cfg.VibrationStrength, 0f, 1f);
+            var low = cfg.Vibration && live ? (ushort)(ds.LargeMotor * 257 * strength) : (ushort)0;
+            var high = cfg.Vibration && live ? (ushort)(ds.SmallMotor * 257 * strength) : (ushort)0;
+            var last = _rumble[p];
+            var running = low != 0 || high != 0;
+            if (low == last.Low && high == last.High && (!running || now - last.At < 200)) continue;
+            //SDL stops the effect after the duration, it is renewed every 200 ms while a motor runs
+            _sdl.GameControllerRumble(Pad(p), low, high, running ? 400u : 0u);
+            _rumble[p] = (low, high, now);
+        }
+    }
+
+    private static readonly bool[] _rumbleHeldBack = new bool[GameConfig.MaxPlayers];
+
+    //rumble on a Bluetooth PlayStation pad switches it into extended reports until it is powered off (see the hints in
+    //Initialize); that only happens when the player turned PlayStationBluetoothRumble on
+    private static bool RumbleAllowed(int p)
+    {
+        var type = _sdl!.GameControllerGetType(Pad(p));
+        if (type is not (GameControllerType.PS4 or GameControllerType.PS5)) return true;
+        if (Connection(_padIds[p]) != "Bluetooth" || ConfigManager.Game.PlayStationBluetoothRumble) return true;
+        if (!_rumbleHeldBack[p])
+        {
+            _rumbleHeldBack[p] = true;
+            Console.WriteLine($"[Input] P{p + 1} '{PadName(p)}' is a Bluetooth PlayStation pad: vibration is held back " +
+                              "(turn on 'Vibration over Bluetooth' / PlayStationBluetoothRumble to allow it)");
+        }
+
+        return false;
     }
 
     public static void SetRumble(byte large, byte small)

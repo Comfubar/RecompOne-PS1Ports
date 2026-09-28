@@ -291,7 +291,7 @@ public static class HostWindow
         if (_window.IsClosing)
         {
             Runtime.Shutdown();
-            Environment.Exit(0);
+            Environment.Exit(Runtime.ExitCode);
         }
 
         InputManager.Poll();
@@ -330,7 +330,7 @@ public static class HostWindow
         if (_window.IsClosing)
         {
             Runtime.Shutdown();
-            Environment.Exit(0);
+            Environment.Exit(Runtime.ExitCode);
         }
         
         InputManager.Poll();
@@ -381,7 +381,7 @@ public static class HostWindow
         if (_window.IsClosing)
         {
             Runtime.Shutdown();
-            Environment.Exit(0);
+            Environment.Exit(Runtime.ExitCode);
         }
 
         _window.DoRender();
@@ -454,8 +454,9 @@ public static class HostWindow
             {
                 _window!.DoEvents();
             }
-            catch
+            catch (Exception e)
             {
+                Diagnostics.CrashReporter.ReportError(e, "window event pump (DoEvents)");
             }
 
             if (_window!.IsClosing)
@@ -471,7 +472,7 @@ public static class HostWindow
         if (!closing) return;
 
         Runtime.Shutdown();
-        Environment.Exit(0);
+        Environment.Exit(Runtime.ExitCode);
     }
 
     private static void OnLoad()
@@ -649,25 +650,27 @@ public static class HostWindow
         Memory.RamLogger.TrackWrites = Memory.RamLogger.TrackReads || Diagnostics.WriteWatch.Enabled;
 
         var gpu = _gpu;
+        Diagnostics.FrameRate.MarkHost();
         if (gpu != null)
         {
-            _glBackend?.RunFrameDiagnostics(gpu.DisplayX, gpu.DisplayY, gpu.DisplayWidth, gpu.DisplayHeight,
-                gpu.Display24Bit, gpu.DisplayEnabled, Hle.GpuHle.Active);
-
-            if (Hle.GpuHle.Active && _glBackend is { Ready: true } && gpu.DisplayEnabled)
+            //one snapshot of the display registers for both the present and the diagnostics, the game thread moves them
+            int dx = gpu.DisplayX, dy = gpu.DisplayY, dw = gpu.DisplayWidth, dh = gpu.DisplayHeight;
+            bool d24 = gpu.Display24Bit, on = gpu.DisplayEnabled;
+            if (Hle.GpuHle.Active && _glBackend is { Ready: true } && on)
             {
                 var wf = _window!.FramebufferSize;
-                var (tex, tw, th, aspect) = _glBackend.PresentDisplay(
-                    gpu.DisplayX, gpu.DisplayY,
-                    gpu.DisplayWidth, gpu.DisplayHeight,
-                    gpu.Display24Bit,
-                    wf.X, wf.Y);
+                var (tex, tw, th, aspect) = _glBackend.PresentDisplay(dx, dy, dw, dh, d24, wf.X, wf.Y);
                 if (tex != 0) OutputPanel.SetTexture(tex, tw, th, aspect);
+                //after the present, so captures are the frame the window shows (they used to read vram before the
+                //display render targets were written back and could catch a cleared, black buffer)
+                if (tex != 0) _glBackend.RunPresentedDiagnostics(dx, dy, dw, dh, d24, on, Hle.GpuHle.Active);
+                else _glBackend.RunFrameDiagnostics(dx, dy, dw, dh, d24, on, Hle.GpuHle.Active);
                 gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
                 gl.Viewport(0, 0, (uint)wf.X, (uint)wf.Y);
             }
             else
             {
+                _glBackend?.RunFrameDiagnostics(dx, dy, dw, dh, d24, on, Hle.GpuHle.Active);
                 UploadDisplayTexture(gl, gpu);
             }
 

@@ -365,6 +365,9 @@ public static class Runtime
             Interrupts.Deliver(irq, Cpu, Mem);
     }
 
+    //the process exit code once the window closes (a test script sets it, for example 3 for a failed step)
+    public static int ExitCode { get; set; }
+
     public static void Shutdown()
     {
         Audio.Shutdown();

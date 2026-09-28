@@ -367,6 +367,7 @@ public sealed class Sio0
     private bool Select(int slot, string trace, out byte rx)
     {
         _pad = Sample(slot);
+        Controller.Pads[slot].Track(_pad);
         if (_pad.Connected)
         {
             rx = 0xFF;
@@ -377,58 +378,15 @@ public sealed class Sio0
         return End(out rx);
     }
 
-    //one pad after its address byte: 42h reads it (digital: ID 41h, 5Ah, buttons; analog: ID 73h, 5Ah, buttons,
-    //sticks). A digital pad does not answer any other command, the transfer ends without an ack.
+    //one pad after its address byte: a DualShock (see DualShock); the step after the address byte is its position 0
     private bool PadStep(int step, byte value, int slot, string trace, out byte rx)
     {
-        var pad = _pad;
-        switch (step)
-        {
-            case 1:
-                if (value != 0x42)
-                {
-                    Input.InputTrace.Call("SIO0 pad command", $"slot {Controller.SlotName(slot)} cmd 0x{value:X2}",
-                        $"not supported, no ack (#{++_unsupported})");
-                    return End(out rx);
-                }
-
-                rx = pad.Analog ? (byte)0x73 : (byte)0x41;
-                return true;
-            case 2:
-                rx = 0x5A;
-                return true;
-            case 3:
-                rx = (byte)pad.Buttons;
-                return true;
-            case 4:
-                rx = (byte)(pad.Buttons >> 8);
-                Input.InputTrace.Data(trace, slot, true, pad.Buttons);
-                if (!pad.Analog)
-                {
-                    _step = 0;
-                    _device = DeviceNone;
-                    return false;
-                }
-
-                Input.InputTrace.Sticks(trace, slot, pad.LeftX, pad.LeftY, pad.RightX, pad.RightY);
-                return true;
-            case 5:
-                rx = pad.RightX;
-                return true;
-            case 6:
-                rx = pad.RightY;
-                return true;
-            case 7:
-                rx = pad.LeftX;
-                return true;
-            case 8:
-                rx = pad.LeftY;
-                _step = 0;
-                _device = DeviceNone;
-                return false;
-            default:
-                return End(out rx);
-        }
+        rx = Controller.Pads[slot].Reply(step - 1, value, _pad, out var more);
+        if (step == 4) Input.InputTrace.Data(trace, slot, true, _pad.Buttons);
+        if (more) return true;
+        _step = 0;
+        _device = DeviceNone;
+        return false;
     }
 
     private bool End(out byte rx)
@@ -514,10 +472,11 @@ public sealed class Sio0
         for (var i = 0; i < 4; i++)
         {
             var p = Sample(baseSlot + i);
+            Controller.Pads[baseSlot + i].Track(p);
             _lanePad[i] = p;
             _laneDone[i] = !p.Connected;
             Input.InputTrace.Data("SIO0 multitap poll", baseSlot + i, p.Connected, p.Buttons);
-            if (p.Connected && p.Analog)
+            if (p.Connected && Controller.Pads[baseSlot + i].AnalogMode)
                 Input.InputTrace.Sticks("SIO0 multitap poll", baseSlot + i, p.LeftX, p.LeftY, p.RightX, p.RightY);
         }
     }
@@ -527,32 +486,8 @@ public sealed class Sio0
     private byte LaneReply(int lane, int pos, byte value, int baseSlot)
     {
         if (_laneDone[lane]) return 0xFF;
-        var p = _lanePad[lane];
-        switch (pos)
-        {
-            case 0:
-                if (value == 0x42) return p.Analog ? (byte)0x73 : (byte)0x41;
-                Input.InputTrace.Call("SIO0 multitap lane", $"slot {Controller.SlotName(baseSlot + lane)} cmd 0x{value:X2}",
-                    $"not supported, FFh (#{++_unsupported})");
-                _laneDone[lane] = true;
-                return 0xFF;
-            case 1:
-                return 0x5A;
-            case 2:
-                return (byte)p.Buttons;
-            case 3:
-                if (!p.Analog) _laneDone[lane] = true;
-                return (byte)(p.Buttons >> 8);
-            case 4:
-                return p.RightX;
-            case 5:
-                return p.RightY;
-            case 6:
-                return p.LeftX;
-            default:
-                _laneDone[lane] = true;
-                return p.LeftY;
-        }
+        var rx = Controller.Pads[baseSlot + lane].Reply(pos, value, _lanePad[lane], out var more);
+        if (!more) _laneDone[lane] = true;
+        return rx;
     }
 }
-//shit
