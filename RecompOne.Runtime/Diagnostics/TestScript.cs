@@ -329,9 +329,21 @@ public static class TestScript
             case "audio":
             {
                 //audio [label]: loudness since the last "audio" (RMS of the output and of left minus right)
+                //plus the SPU right now: sounding voices, how many of them are panned (left volume != right volume) and
+                //the reverb output volume (reverb has its own stereo image, so it leaves some side signal even in mono)
                 var (rms, side, frames) = AudioStats.TakeLoudness();
+                var spu = "";
+                if (Runtime.Spu is { } unit)
+                {
+                    var voices = new RecompOne.Runtime.Spu.VoiceDebug[24];
+                    unit.CaptureDebug(voices, out var st);
+                    var on = voices.Where(v => v.Phase != RecompOne.Runtime.Spu.AdsrPhase.Off).ToList();
+                    spu = $", voices {on.Count} (panned {on.Count(v => v.VolL != v.VolR)}, reverb {on.Count(v => v.Reverb)}), " +
+                          $"main vol {st.MainVolL:X4}/{st.MainVolR:X4}, reverb vol {st.ReverbVolL:X4}/{st.ReverbVolR:X4}";
+                }
+
                 Console.WriteLine($"[TestScript] audio {(p.Length > 1 ? p[1] : "")}: rms {rms:0.0} side {side:0.0} " +
-                                  $"({frames / 44100.0:0.0} s, keyOns {AudioStats.KeyOns}, xaSectors {AudioStats.XaSectors})");
+                                  $"({frames / 44100.0:0.0} s, keyOns {AudioStats.KeyOns}, xaSectors {AudioStats.XaSectors}{spu})");
                 return true;
             }
             case "fps":
