@@ -18,7 +18,7 @@ namespace RecompOne.Runtime.Diagnostics;
 //  wait stable <n>                      until the shown frame has not changed for n host frames
 //  wait region <ref> [recent <n>]       until the shown frame (or any of the last n) matches reference <ref>
 //  wait log <text>                      until a console line containing <text> is written after this step started
-//  wait fmv (a movie is playing) | wait shown (not a black screen) | wait not <condition>
+//  wait fmv (a movie is playing) | wait shown (not a black screen) | wait not <condition> | wait <c1> or <c2> ...
 //  wait multitap on|off | wait pads <n> | wait player <1-4> <name part|none> | wait file <data file> (content changed)
 //  until <condition> do <action> [every <s>]   repeats the action until the wait condition holds (menu steps)
 //  wait gone <text>                     fails if a console line containing <text> appears within the time given
@@ -72,7 +72,7 @@ public static class TestScript
     private static readonly string[] SequentialVerbs =
     [
         "step", "sleep", "wait", "capture", "press", "stick", "plug", "unplug", "key", "keydown", "keyup", "vpad",
-        "dump", "fps", "reset", "quit", "ramdump", "until", "profile", "run"
+        "dump", "fps", "reset", "quit", "ramdump", "until", "profile", "run", "audio"
     ];
 
     private static List<Action> Load()
@@ -326,6 +326,14 @@ public static class TestScript
                 if (Elapsed(s) > 20) throw new TimeoutException("no frame was dumped within 20 s");
                 return false;
             }
+            case "audio":
+            {
+                //audio [label]: loudness since the last "audio" (RMS of the output and of left minus right)
+                var (rms, side, frames) = AudioStats.TakeLoudness();
+                Console.WriteLine($"[TestScript] audio {(p.Length > 1 ? p[1] : "")}: rms {rms:0.0} side {side:0.0} " +
+                                  $"({frames / 44100.0:0.0} s, keyOns {AudioStats.KeyOns}, xaSectors {AudioStats.XaSectors})");
+                return true;
+            }
             case "fps":
                 Console.WriteLine($"[TestScript] fps game={FrameRate.GameFps:0.0} host={FrameRate.HostFps:0.0}");
                 return true;
@@ -398,6 +406,7 @@ public static class TestScript
         public long LogMark;
         public double Best = 1.0;
         public string? FileHash;
+        public List<WaitState>? Parts;
     }
 
     private static bool Wait(Step s, string[] p)
@@ -428,6 +437,32 @@ public static class TestScript
     //c = condition words without "wait": overlay <name> | ram ... | stable <n> | region <ref> | log <text>
     private static (bool, string) Condition(string[] c, WaitState st)
     {
+        //a or b [or c ...]: each part keeps its own state (references), the first that holds wins
+        var or = Array.FindIndex(c, x => x.Equals("or", StringComparison.OrdinalIgnoreCase));
+        if (or > 0)
+        {
+            st.Parts ??= [];
+            var parts = new List<string[]>();
+            var start = 0;
+            for (var i = 0; i <= c.Length; i++)
+                if (i == c.Length || c[i].Equals("or", StringComparison.OrdinalIgnoreCase))
+                {
+                    parts.Add(c[start..i]);
+                    start = i + 1;
+                }
+
+            var details = new List<string>();
+            for (var i = 0; i < parts.Count; i++)
+            {
+                while (st.Parts.Count <= i) st.Parts.Add(new WaitState { LogMark = st.LogMark });
+                var (met, detail) = Condition(parts[i], st.Parts[i]);
+                if (met) return (true, $"{string.Join(' ', parts[i])}: {detail}");
+                details.Add(detail);
+            }
+
+            return (false, string.Join(" / ", details));
+        }
+
         if (c[0].Equals("not", StringComparison.OrdinalIgnoreCase))
         {
             var (met, detail) = Condition(c[1..], st);
@@ -478,12 +513,16 @@ public static class TestScript
             }
             case "region":
             {
+                //region <ref> [max <percent>]: how different the region may be (default 5%)
                 ScreenProbe.Enable();
                 st.Ref ??= ScreenProbe.LoadReference(c[1]);
+                var max = c.Length > 3 && c[2].Equals("max", StringComparison.OrdinalIgnoreCase)
+                    ? double.Parse(c[3], CultureInfo.InvariantCulture) / 100
+                    : 0.05;
                 var f = ScreenProbe.Latest;
                 var diff = ScreenProbe.Difference(st.Ref, f);
                 st.Best = Math.Min(st.Best, diff);
-                if (diff > 0.05)
+                if (diff > max)
                     return (false, $"best difference {st.Best:P1} (frame {f.W}x{f.H}, reference frame {st.Ref.FrameW}x{st.Ref.FrameH})");
                 var r = st.Ref;
                 return (true, $"difference {diff:P1}, region hash {ScreenProbe.Hash(f.Pixels!, r.X, r.Y, r.W, r.H, f.W):x16}");
