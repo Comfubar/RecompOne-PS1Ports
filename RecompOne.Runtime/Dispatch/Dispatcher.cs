@@ -155,10 +155,23 @@ public static class Dispatcher
                               $"(first func_{func:X8} at 0x{at:X8}), they will refuse to run until ram matches again");
     }
 
-    //before running a guarded function, make sure the bytes it was recompiled from are still what is in ram
-    private static void CheckStale(uint addr, IMemory m)
+    //before running a guarded function, make sure the bytes it was recompiled from are still what is in ram. When they
+    //are not, another program may have been loaded over it with its own function at the same address (the EXE.PAC
+    //programs all start at 0x800A0000; Rankings has a function where the menus program has its entry point): switch on
+    //the program whose code ram holds now. Only when no registered program matches ram is it an error.
+    private static bool CheckStale(uint addr, IMemory m)
     {
-        if (!_guards.TryGetValue(addr, out var g)) return;
+        var msg = StaleMessage(addr, m);
+        if (msg == null) return true;
+        if (ActivateAt(addr, m, "call to overwritten code at")) return false;
+
+        Console.WriteLine($"[Dispatcher] ERROR: {msg}");
+        throw new InvalidOperationException(msg);
+    }
+
+    private static string? StaleMessage(uint addr, IMemory m)
+    {
+        if (!_guards.TryGetValue(addr, out var g)) return null;
 
         var dirty = false;
         for (var p = Phys(g.Start) >> PageShift; p <= Phys(g.End - 1) >> PageShift; p++)
@@ -168,19 +181,16 @@ public static class Dispatcher
                 break;
             }
 
-        if (!dirty) return;
+        if (!dirty) return null;
 
         var bad = FirstMismatch(g.Owner, m, g.Start, g.End);
         if (bad >= 0)
-        {
-            var msg = $"stale code: 0x{addr:X8} ({g.Owner.Name}, 0x{g.Start:X8}-0x{g.End:X8}) was overwritten in ram " +
-                      $"(0x{bad:X8} is 0x{m.ReadU8((uint)bad):X2}, recompiled from 0x{g.Owner.Image![bad - g.Owner.Base]:X2}), " +
-                      $"active overlays: {string.Join(", ", ActiveNames)}";
-            Console.WriteLine($"[Dispatcher] ERROR: {msg}");
-            throw new InvalidOperationException(msg);
-        }
+            return $"stale code: 0x{addr:X8} ({g.Owner.Name}, 0x{g.Start:X8}-0x{g.End:X8}) was overwritten in ram " +
+                   $"(0x{bad:X8} is 0x{m.ReadU8((uint)bad):X2}, recompiled from 0x{g.Owner.Image![bad - g.Owner.Base]:X2}), " +
+                   $"active overlays: {string.Join(", ", ActiveNames)}";
 
         g.VerifiedGen = _gen++;
+        return null;
     }
 
     //code that got into ram without a disc read the dispatcher could track (unpacked from an archive, copied,
@@ -435,7 +445,13 @@ public static class Dispatcher
 
         if (_funcMap.TryGetValue(addr, out var fn))
         {
-            CheckStale(addr, m);
+            //false: another program was switched on for this address, look the function up again
+            if (!CheckStale(addr, m))
+            {
+                Call(c, m, addr);
+                return;
+            }
+
             fn(c, m);
             return;
         }
@@ -443,7 +459,12 @@ public static class Dispatcher
         var cached = Cached(addr);
         if (cached != addr && _funcMap.TryGetValue(cached, out fn))
         {
-            CheckStale(cached, m);
+            if (!CheckStale(cached, m))
+            {
+                Call(c, m, addr);
+                return;
+            }
+
             fn(c, m);
             return;
         }
