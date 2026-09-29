@@ -39,6 +39,15 @@ public static class LibMcrd
 
     private static readonly bool[] _seen = new bool[2];
 
+    //RECOMPONE_MCRD_TRACE=1: one line per memory card library call (what the game asked for and the answer)
+    private static readonly uint[] _lastExist = [uint.MaxValue, uint.MaxValue];
+    private static readonly bool TraceOn = Environment.GetEnvironmentVariable("RECOMPONE_MCRD_TRACE") == "1";
+
+    private static void Trace(string call, uint chan, string detail, uint result)
+    {
+        if (TraceOn) Console.WriteLine($"[Mcrd] {call} slot {(Slot(chan) == 0 ? 'A' : 'B')} {detail} -> {result}");
+    }
+
     private static MemoryCard? _openCard;
     private static string _openName = "";
     private static uint _openFlag;
@@ -115,11 +124,16 @@ public static class LibMcrd
     public static void MemCardExist(CpuContext c, IMemory m)
     {
         c.V0 = Post(McFuncExist, Probe(c.A0, false));
+        //games poll this every frame while a card screen is up: trace it when the answer changes
+        if (_pendingResult == _lastExist[Slot(c.A0)]) return;
+        _lastExist[Slot(c.A0)] = _pendingResult;
+        Trace("Exist", c.A0, $"(pending result {_pendingResult})", c.V0);
     }
 
     public static void MemCardAccept(CpuContext c, IMemory m)
     {
         c.V0 = Post(McFuncAccept, Probe(c.A0, true));
+        Trace("Accept", c.A0, $"(pending result {_pendingResult})", c.V0);
     }
 
     public static void MemCardOpen(CpuContext c, IMemory m)
@@ -141,6 +155,7 @@ public static class LibMcrd
         if (card.Find(name) == 0)
         {
             c.V0 = McErrFileNotExist;
+            Trace("Open", c.A0, name, c.V0);
             return;
         }
 
@@ -148,6 +163,7 @@ public static class LibMcrd
         _openName = name;
         _openFlag = c.A2;
         c.V0 = McErrNone;
+        Trace("Open", c.A0, name, c.V0);
     }
 
     public static void MemCardClose(CpuContext c, IMemory m)
@@ -166,6 +182,7 @@ public static class LibMcrd
         }
 
         c.V0 = Post(McFuncReadData, Transfer(m, _openCard, _openName, c.A0, (int)c.A1, (int)c.A2, false));
+        Trace("ReadData", 0u, $"{_openName} offset {c.A1} bytes {c.A2} (pending result {_pendingResult})", c.V0);
     }
 
     public static void MemCardWriteData(CpuContext c, IMemory m)
@@ -177,6 +194,7 @@ public static class LibMcrd
         }
 
         c.V0 = Post(McFuncWriteData, Transfer(m, _openCard, _openName, c.A0, (int)c.A1, (int)c.A2, true));
+        Trace("WriteData", 0u, $"{_openName} offset {c.A1} bytes {c.A2} (pending result {_pendingResult})", c.V0);
     }
 
     public static void MemCardReadFile(CpuContext c, IMemory m)
@@ -184,6 +202,7 @@ public static class LibMcrd
         if (_openCard != null || _pending)
         {
             c.V0 = 0u;
+            Trace("ReadFile", c.A0, $"{Bios.Bios.ReadString(m, c.A1)} refused: {(_pending ? "a command is pending" : "a file is open")}", c.V0);
             return;
         }
 
@@ -196,6 +215,7 @@ public static class LibMcrd
         }
 
         c.V0 = Post(McFuncReadFile, Transfer(m, Card(c.A0), name, c.A2, (int)c.A3, bytes, false));
+        Trace("ReadFile", c.A0, $"{name} offset {c.A3} bytes {bytes} (pending result {_pendingResult})", c.V0);
     }
 
     public static void MemCardWriteFile(CpuContext c, IMemory m)
@@ -203,6 +223,7 @@ public static class LibMcrd
         if (_openCard != null || _pending)
         {
             c.V0 = 0u;
+            Trace("WriteFile", c.A0, $"{Bios.Bios.ReadString(m, c.A1)} refused: {(_pending ? "a command is pending" : "a file is open")}", c.V0);
             return;
         }
 
@@ -215,6 +236,7 @@ public static class LibMcrd
         }
 
         c.V0 = Post(McFuncWriteFile, Transfer(m, Card(c.A0), name, c.A2, (int)c.A3, bytes, true));
+        Trace("WriteFile", c.A0, $"{name} offset {c.A3} bytes {bytes} (pending result {_pendingResult})", c.V0);
     }
 
     private static uint Transfer(IMemory m, MemoryCard card, string name, uint addr, int offset, int bytes, bool write)
@@ -266,6 +288,7 @@ public static class LibMcrd
 
         card.Flush();
         c.V0 = McErrNone;
+        Trace("CreateFile", c.A0, $"{name} blocks {c.A2}", c.V0);
     }
 
     public static void MemCardDeleteFile(CpuContext c, IMemory m)
@@ -293,6 +316,7 @@ public static class LibMcrd
         card.Delete(name);
         card.Flush();
         c.V0 = McErrNone;
+        Trace("DeleteFile", c.A0, name, c.V0);
     }
 
     public static void MemCardFormat(CpuContext c, IMemory m)
@@ -348,7 +372,9 @@ public static class LibMcrd
         var skip = (int)m.ReadU32(c.SP + 0x10u);
         var max = (int)m.ReadU32(c.SP + 0x14u);
 
-        var hits = card.Match(Bios.Bios.ReadString(m, c.A1));
+        var pattern = Bios.Bios.ReadString(m, c.A1);
+        var hits = card.Match(pattern);
+        Trace("GetDirentry", c.A0, $"{pattern}: {hits.Count} file(s) {string.Join(",", hits.Select(h => h.name))}", McErrNone);
         if (filesPtr != 0u) m.WriteU32(filesPtr, (uint)hits.Count);
 
         var stored = 0;
