@@ -119,7 +119,8 @@ public class ViewConfig
 
     public bool VSync
     {
-        get => GetBool("VSync");
+        //on unless the player turned it off: without it the host presents as fast as it can and draws frames twice
+        get => GetBool("VSync", true);
         set => SetBool("VSync", value);
     }
 

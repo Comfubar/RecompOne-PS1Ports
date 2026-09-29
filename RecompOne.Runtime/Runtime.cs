@@ -209,6 +209,7 @@ public static class Runtime
     //returns the process exit code: 0 when the game ended normally, 1 when it crashed (see CrashReporter)
     public static int Run(Action boot, int maxStackSize = 0)
     {
+        Diagnostics.SessionLog.StartIfConfigured();
         Diagnostics.CrashReporter.Install();
         Pgxp.PgxpGpu.Init();
         Host.GpuJobs.Claim();

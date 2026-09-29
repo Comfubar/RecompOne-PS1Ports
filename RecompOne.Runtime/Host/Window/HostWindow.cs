@@ -146,8 +146,30 @@ public static class HostWindow
                 _window = null;
             }
 
-        Console.Error.WriteLine("[Host] no usable gl context were found");
-        _headless = true;
+        Console.Error.WriteLine("[Host] ERROR: no usable OpenGL context (4.5, 3.3 or 2.1) could be created");
+        if (Environment.GetEnvironmentVariable("RECOMPONE_HEADLESS") == "1")
+        {
+            _headless = true;
+            return;
+        }
+
+        //a player gets told why nothing appears instead of a game running without a window
+        NoOpenGlMessage(title);
+        Diagnostics.CrashReporter.ReportError(new InvalidOperationException("no usable OpenGL context"), "window creation");
+        Environment.Exit(4);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int MessageBoxW(nint hwnd, string text, string caption, uint type);
+
+    private static void NoOpenGlMessage(string title)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        MessageBoxW(0,
+            "The game could not start its graphics: this PC's graphics driver offers no usable OpenGL version " +
+            "(3.3 or newer is needed; 2.1 works with fewer features).\n\nInstall the latest driver from your graphics " +
+            "card's maker (NVIDIA, AMD or Intel). Remote desktop sessions and some virtual machines do not offer OpenGL.",
+            title, 0x10);
     }
 
     public static string Title
@@ -604,8 +626,9 @@ public static class HostWindow
             Silk.NET.GLFW.Glfw.GetApi().SwapInterval(interval);
             return true;
         }
-        catch
+        catch (Exception e)
         {
+            Console.WriteLine($"[Host] swap interval {interval} not available: {e.GetType().Name}: {e.Message}");
             return false;
         }
     }

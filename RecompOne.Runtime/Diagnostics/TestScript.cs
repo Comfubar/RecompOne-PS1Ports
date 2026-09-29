@@ -16,7 +16,7 @@ namespace RecompOne.Runtime.Diagnostics;
 //  wait overlay <name>                  until that program's code is active (Dispatcher.ActiveNames)
 //  wait ram <hex addr>[:u8|u16|u32] <==|!=|>=|<=> <value>   (value hex with 0x, or decimal)
 //  wait stable <n>                      until the shown frame has not changed for n host frames
-//  wait region <ref>                    until the shown frame matches reference <ref> (see ScreenProbe)
+//  wait region <ref> [recent <n>]       until the shown frame (or any of the last n) matches reference <ref>
 //  wait log <text>                      until a console line containing <text> is written after this step started
 //  wait fmv (a movie is playing) | wait shown (not a black screen) | wait not <condition>
 //  wait multitap on|off | wait pads <n> | wait player <1-4> <name part|none> | wait file <data file> (content changed)
@@ -30,7 +30,7 @@ namespace RecompOne.Runtime.Diagnostics;
 //  vpad detach <id>
 //  vpad press <id[,id]> <Button[+Button]> [ms]   SDL button names (a b x y back start dpup ... leftshoulder)
 //  vpad axis <id[,id]> <axis> <value -32768..32767> [ms]   ms = hold then back to 0; without ms it stays
-//  dump | fps | reset | quit [code] | ramdump <name>
+//  dump | fps | reset | quit [code] | ramdump <name> | run <file> (RECOMPONE_TESTS/<file>.txt as one step)
 //Any wait takes "within <seconds>" (default 60). A wait that times out fails the script: the reason and the shown
 //frame (dumps/frames/fail_*.png) are logged and the process exits with code 3.
 //
@@ -72,7 +72,7 @@ public static class TestScript
     private static readonly string[] SequentialVerbs =
     [
         "step", "sleep", "wait", "capture", "press", "stick", "plug", "unplug", "key", "keydown", "keyup", "vpad",
-        "dump", "fps", "reset", "quit", "ramdump", "until", "profile"
+        "dump", "fps", "reset", "quit", "ramdump", "until", "profile", "run"
     ];
 
     private static List<Action> Load()
@@ -337,6 +337,8 @@ public static class TestScript
                 return true;
             case "capture":
                 return Capture(s, p);
+            case "run":
+                return RunFile(s, p);
             case "profile":
                 //prints the sampled call chains since the last "profile" (RECOMPONE_PROFILE=1) and starts over
                 Profiler.Report(p.Length > 1 ? int.Parse(p[1], CultureInfo.InvariantCulture) : 25);
@@ -464,6 +466,16 @@ public static class TestScript
                 var black = f.Pixels == null || ScreenProbe.IsBlack(f);
                 return (!black && f.StableFor >= n, $"stable for {f.StableFor} frame(s){(black ? ", black" : "")}");
             }
+            case "region" when c.Length > 3 && c[2].Equals("recent", StringComparison.OrdinalIgnoreCase):
+            {
+                //region <ref> recent <n>: matched in any of the last n host frames (for blinking highlights)
+                ScreenProbe.Enable();
+                st.Ref ??= ScreenProbe.LoadReference(c[1]);
+                var n = int.Parse(c[3], CultureInfo.InvariantCulture);
+                var frames = ScreenProbe.Recent(n);
+                var best = frames.Length == 0 ? 1.0 : frames.Min(f => ScreenProbe.Difference(st.Ref, f));
+                return (frames.Length >= n && best <= 0.05, $"best difference over the last {frames.Length} frame(s) {best:P1}");
+            }
             case "region":
             {
                 ScreenProbe.Enable();
@@ -545,6 +557,47 @@ public static class TestScript
             default:
                 throw new FormatException($"unknown condition '{c[0]}' (overlay, ram, stable, region, log, gone, multitap, pads, player, file)");
         }
+    }
+
+    private sealed class RunState
+    {
+        public readonly Queue<Step> Steps = new();
+        public Step? Current;
+    }
+
+    //run <name>: the lines of RECOMPONE_TESTS/<name>.txt as one step (a sequence to repeat with until ... do run)
+    private static bool RunFile(Step s, string[] p)
+    {
+        if (s.State is not RunState rs)
+        {
+            if (p.Length < 2) throw new FormatException("run <test file name>");
+            var dir = Environment.GetEnvironmentVariable("RECOMPONE_TESTS") is { Length: > 0 } d ? d : "tests";
+            var file = Path.Combine(dir, p[1].EndsWith(".txt") ? p[1] : p[1] + ".txt");
+            if (!File.Exists(file)) throw new FileNotFoundException($"run: {Path.GetFullPath(file)} not found");
+            rs = new RunState();
+            foreach (var raw in File.ReadAllLines(file))
+            {
+                var line = raw.Split('#')[0].Trim();
+                if (line.Length == 0) continue;
+                rs.Steps.Enqueue(new Step(line, line.Split(' ', StringSplitOptions.RemoveEmptyEntries), s.Line, s.Live));
+            }
+
+            s.State = rs;
+        }
+
+        for (var guard = 0; guard < 32; guard++)
+        {
+            if (rs.Current == null)
+            {
+                if (!rs.Steps.TryDequeue(out rs.Current)) return true;
+                rs.Current.Started = _clock.Elapsed.TotalSeconds;
+            }
+
+            if (!Run(rs.Current)) return false;
+            rs.Current = null;
+        }
+
+        return false;
     }
 
     private sealed class UntilState

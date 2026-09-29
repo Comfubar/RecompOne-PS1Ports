@@ -19,6 +19,15 @@ public static class ScreenProbe
     public static void Enable() => _wanted = true;
     public static Frame Latest => _latest;
 
+    //the last host frames, newest last, for regions that flash (a highlighted menu item blinks)
+    private const int HistoryLength = 90;
+    private static readonly Queue<Frame> _history = new();
+
+    public static Frame[] Recent(int n)
+    {
+        lock (_history) return _history.Skip(Math.Max(0, _history.Count - n)).ToArray();
+    }
+
     public static string DumpRoot => Environment.GetEnvironmentVariable("RECOMPONE_DUMP_DIR") is { Length: > 0 } d ? d : "dumps";
     public static string RefDir => Environment.GetEnvironmentVariable("RECOMPONE_TESTREFS") is { Length: > 0 } d ? d : "testrefs";
 
@@ -30,6 +39,11 @@ public static class ScreenProbe
         var stable = hash == prev.Hash && w == prev.W && h == prev.H ? prev.StableFor + 1 : 1;
         var frame = new Frame(px, w, h, hostFrame, hash, stable);
         _latest = frame with { ShownFor = IsBlack(frame) ? 0 : prev.ShownFor + 1 };
+        lock (_history)
+        {
+            _history.Enqueue(_latest);
+            while (_history.Count > HistoryLength) _history.Dequeue();
+        }
     }
 
     public static bool IsBlack(Frame f)

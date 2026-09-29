@@ -506,11 +506,16 @@ public sealed class CdController
             _sectorsRead++;
             _seekLba++;
         }
-        catch
+        catch (Exception e) when (e is IOException or ArgumentOutOfRangeException or InvalidDataException or ObjectDisposedException)
         {
+            //the game gets an empty sector; the log says why (a disc image moved or locked while playing)
             Array.Clear(_dataBuf);
+            if (_readErrors++ < 20)
+                Console.WriteLine($"[Cdrom] ERROR reading sector {_seekLba}: {e.GetType().Name}: {e.Message}");
         }
     }
+
+    private int _readErrors;
 
     public DiscFs Fs => _fs;
 

@@ -62,8 +62,13 @@ public static class ConfigManager
                 Game = JsonSerializer.Deserialize<GameConfig>(File.ReadAllText(GameConfigPath), _opts) ??
                        new GameConfig();
             }
-            catch
+            catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or NotSupportedException)
             {
+                //the damaged file is kept next to the fresh defaults, never silently overwritten
+                var copy = GameConfigPath + $".damaged-{DateTime.Now:yyyyMMdd-HHmmss}";
+                if (e is JsonException) File.Copy(GameConfigPath, copy, true);
+                Console.WriteLine($"[Config] {GameConfigPath} could not be read ({e.GetType().Name}: {e.Message}); using the " +
+                                  $"defaults{(e is JsonException ? $", the file was kept as {copy}" : "")}");
                 Game = new GameConfig();
             }
         else

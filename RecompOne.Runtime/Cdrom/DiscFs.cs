@@ -83,8 +83,9 @@ public sealed class DiscFs : IDisposable
             ReadFile(path);
             return true;
         }
-        catch
+        catch (FileNotFoundException)
         {
+            //read errors are not "missing": they reach the caller
             return false;
         }
     }

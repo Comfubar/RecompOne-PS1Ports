@@ -495,18 +495,7 @@ internal static unsafe class InputManager
 
     public static bool IsGenericMapping(string guid) => _generic.Contains(guid);
 
-    //SDL's GUID starts with the bus type (little endian): 03h USB, 05h Bluetooth, FFh virtual
-    public static string Connection(string guid)
-    {
-        if (guid.Length < 4) return "";
-        return guid[..4].ToLowerInvariant() switch
-        {
-            "0300" => "USB",
-            "0500" => "Bluetooth",
-            "ff00" => "virtual",
-            _ => ""
-        };
-    }
+    public static string Connection(string guid) => Input.PadInfo.Connection(guid);
 
     //the family of a player's pad, for labels and rumble rules
     public static string Family(int player)
@@ -515,22 +504,7 @@ internal static unsafe class InputManager
         return FamilyName(_sdl.GameControllerGetType(Pad(player)));
     }
 
-    public static string FamilyName(GameControllerType t)
-    {
-        return t switch
-        {
-            GameControllerType.Xbox360 => "Xbox 360",
-            GameControllerType.Xboxone => "Xbox One/Series",
-            GameControllerType.PS3 => "PlayStation 3",
-            GameControllerType.PS4 => "PlayStation 4",
-            GameControllerType.PS5 => "PlayStation 5",
-            GameControllerType.NintendoSwitchPro => "Nintendo Switch Pro",
-            GameControllerType.NintendoSwitchJoyconLeft or GameControllerType.NintendoSwitchJoyconRight
-                or GameControllerType.NintendoSwitchJoyconPair => "Nintendo Joy-Con",
-            GameControllerType.Virtual => "virtual",
-            _ => "generic"
-        };
-    }
+    public static string FamilyName(GameControllerType t) => Input.PadInfo.FamilyName(t);
 
     public static string PlayerConnection(int player)
     {

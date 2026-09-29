@@ -57,8 +57,10 @@ public static class GpuBackendFactory //fkn hate these factories
             var minor = gl.GetInteger(GLEnum.MinorVersion);
             if (major > 0) return major > wantMajor || (major == wantMajor && minor >= wantMinor);
         }
-        catch
+        catch (Exception e)
         {
+            //old contexts have no MAJOR_VERSION query; the version string below answers instead
+            Console.WriteLine($"[Gpu] context version query not available ({e.Message}), reading the version string");
         }
 
         var version = Str(gl, StringName.Version);
@@ -76,8 +78,9 @@ public static class GpuBackendFactory //fkn hate these factories
         {
             max = gl.GetInteger(GLEnum.MaxTextureSize);
         }
-        catch
+        catch (Exception e)
         {
+            Console.WriteLine($"[Gpu] max texture size unknown ({e.Message}), keeping vram scale {GlVram.Scale}");
             return;
         }
 
@@ -131,8 +134,9 @@ public static class GpuBackendFactory //fkn hate these factories
                 if (gl.GetStringS(StringName.Extensions, i) == name)
                     return true;
         }
-        catch
+        catch (Exception e)
         {
+            Console.WriteLine($"[Gpu] extension list not available ({e.Message}), treating {name} as missing");
         }
 
         return false;
@@ -144,8 +148,9 @@ public static class GpuBackendFactory //fkn hate these factories
         {
             return gl.GetStringS(name) ?? "?";
         }
-        catch
+        catch (Exception e)
         {
+            Console.WriteLine($"[Gpu] {name} string not available ({e.Message})");
             return "?";
         }
     }

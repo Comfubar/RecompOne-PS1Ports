@@ -35,8 +35,9 @@ public static class DiscImage
             Span<byte> magic = stackalloc byte[8];
             return s.Read(magic) == 8 && magic.SequenceEqual(ChdFile.Magic);
         }
-        catch
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
+            Console.WriteLine($"[Cdrom] cannot read {path} to check its format: {e.Message}");
             return false;
         }
     }
