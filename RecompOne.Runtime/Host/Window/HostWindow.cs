@@ -135,6 +135,9 @@ public static class HostWindow
                 _window.Load += OnLoad;
                 _window.Render += OnRender;
                 _window.Closing += OnClosing;
+                //GLFW keeps window hints between attempts: without a reset the core profile asked for 4.5/3.3 stays
+                //set, and GLFW refuses the 2.1 request ("context profiles are only defined for 3.2 and above")
+                Silk.NET.GLFW.Glfw.GetApi().DefaultWindowHints();
                 _window.Initialize();
                 Console.WriteLine($"[Host] gl context {api.Version.MajorVersion}.{api.Version.MinorVersion} {api.Profile}");
                 return;
@@ -167,7 +170,7 @@ public static class HostWindow
         if (!OperatingSystem.IsWindows()) return;
         MessageBoxW(0,
             "The game could not start its graphics: this PC's graphics driver offers no usable OpenGL version " +
-            "(3.3 or newer is needed; 2.1 works with fewer features).\n\nInstall the latest driver from your graphics " +
+            "(OpenGL 3.3 or newer is recommended; the game also starts with 2.1).\n\nInstall the latest driver from your graphics " +
             "card's maker (NVIDIA, AMD or Intel). Remote desktop sessions and some virtual machines do not offer OpenGL.",
             title, 0x10);
     }
