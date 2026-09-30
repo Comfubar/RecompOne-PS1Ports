@@ -1,8 +1,9 @@
-> **About this fork:** RecompOne-PS1Ports is a fork of [RecompOne](https://github.com/BlackLabelHQ/RecompOne) with
-> the upstream history kept. It adds what the Know Your Role port needed: games made of several programs loaded at
-> the same address (DPAC archives, overlay switching by memory content with a stale code guard), one class library
-> per program (`splitProjects`), reference bytes read from the player's disc (`embedImages: false`), SIO0 multitap
-> and 4 players, crash reports, a hang watchdog and test tooling. See the commits after `d81dec8`.
+> **About this fork.** RecompOne-PS1Ports is a fork of [BlackLabelHQ/RecompOne](https://github.com/BlackLabelHQ/RecompOne),
+> the PlayStation static recompiler, with the upstream history kept. It is the recompiler and runtime that
+> [Know Your Role Recomp](https://github.com/Comfubar/KnowYourRoleRecomp) is built with, and adds what that port needed:
+> games made of several programs loaded at the same address (overlay switching), one class library per program,
+> reference bytes read from the player's own disc, the multitap and 4 players, crash reports and a hang watchdog.
+> RecompOne and this fork are MIT licensed ([LICENSE](LICENSE)); the upstream project and its authors are credited below.
 
 # RecompOne
 
