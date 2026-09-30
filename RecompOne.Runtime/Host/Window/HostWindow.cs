@@ -518,6 +518,8 @@ public static class HostWindow
         _ramTex = CreateTexture(_gl);
 
         Hle.GlVram.Scale = ConfigManager.View.RenderScale;
+        Hle.Widescreen.MonitorAspect = ReadMonitorAspect();
+        Hle.Widescreen.Apply();
         _glBackend = (Hle.GlCore)Hle.GpuBackendFactory.Create(_gl,
             Hle.GpuBackendFactory.Parse(ConfigManager.View.GpuBackend));
         _glBackend.InitGl();
@@ -654,6 +656,24 @@ public static class HostWindow
         {
             Console.WriteLine($"[Host] cant read refresh rate: {e.Message}");
             return 0;
+        }
+    }
+
+    private static unsafe float ReadMonitorAspect()
+    {
+        try
+        {
+            var glfw = Silk.NET.GLFW.Glfw.GetApi();
+            var monitor = glfw.GetPrimaryMonitor();
+            if (monitor == null) return 0f;
+            var mode = glfw.GetVideoMode(monitor);
+            if (mode == null || mode->Height <= 0) return 0f;
+            return (float)mode->Width / mode->Height;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Host] cant read monitor size: {e.Message}");
+            return 0f;
         }
     }
 

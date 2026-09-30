@@ -596,6 +596,12 @@
       "zh-CN": "全屏模式",
       "fr-FR": "Plein écran"
     },
+    "settings.display.widescreen": {
+      "en": "Widescreen"
+    },
+    "settings.display.widescreen_hint": {
+      "en": "Widens 3D to the chosen aspect (auto = match the monitor); HUD and videos keep 4:3. Things near the edges may pop in."
+    },
     "settings.display.vsync": {
       "en": "VSync",
       "pt-BR": "VSync",

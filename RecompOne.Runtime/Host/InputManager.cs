@@ -41,8 +41,26 @@ internal static unsafe class InputManager
     private const int RightStickUp = 108;
     private const int RightStickDown = 109;
     private static bool _topBarToggle;
+    private static bool _topBarChordHeld;
     private static bool _fullscreenToggle;
 
+
+    //L3 + R3 together on player 1's pad toggles the menu bar, for handhelds without a keyboard (F1). The game's pad
+    //runs in digital mode, which has no stick clicks, so the chord never reaches the game as input it uses.
+    private static void PollTopBarChord()
+    {
+        var pad = Pad(0);
+        if (_sdl == null || pad == null)
+        {
+            _topBarChordHeld = false;
+            return;
+        }
+
+        var held = _sdl.GameControllerGetButton(pad, GameControllerButton.Leftstick) != 0 &&
+                   _sdl.GameControllerGetButton(pad, GameControllerButton.Rightstick) != 0;
+        if (held && !_topBarChordHeld) _topBarToggle = true;
+        _topBarChordHeld = held;
+    }
 
     public static bool ConsumeTopBarToggle()
     {
@@ -219,6 +237,7 @@ internal static unsafe class InputManager
         RunHostJobs();
         PollGamepadEvents();
         CheckMirrors();
+        PollTopBarChord();
 
         var cfg = ConfigManager.Game;
         var players = new Controller.PadSlot[GameConfig.MaxPlayers];

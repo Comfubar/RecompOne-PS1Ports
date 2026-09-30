@@ -23,6 +23,10 @@ public static class Gte
     private static readonly int[] BK = new int[3];
     private static readonly int[] FC = new int[3];
     private static int OFX, OFY;
+
+    //widescreen: scales the projected X distance from the screen centre (OFX), 16.16 fixed point; 0x10000 = 4:3.
+    //Set by Hle.Widescreen so 3D covers the wider render target instead of being stretched.
+    public static int WideScaleFx = 0x10000;
     private static ushort H;
     private static short DQA;
     private static int DQB;
@@ -315,7 +319,7 @@ public static class Gte
         SZ[3] = (ushort)sz;
 
         var div = Divide(H, SZ[3]);
-        var sx = CheckMac0((long)div * IR1 + OFX);
+        var sx = CheckMac0((WideScaleFx == 0x10000 ? (long)div * IR1 : ((long)div * IR1 * WideScaleFx) >> 16) + OFX);
         MAC0 = (int)sx;
         var sy = CheckMac0((long)div * IR2 + OFY);
         MAC0 = (int)sy;
@@ -349,7 +353,7 @@ public static class Gte
         var w = Math.Max(z, H / 2.0);
         var hDivSz = H / w;
 
-        var px = (float)(OFX / 65536.0 + IR1 * hDivSz);
+        var px = (float)(OFX / 65536.0 + IR1 * hDivSz * (WideScaleFx / 65536.0));
         var py = (float)(OFY / 65536.0 + IR2 * hDivSz);
 
         px = Math.Clamp(px, -0x400, 0x3FF);

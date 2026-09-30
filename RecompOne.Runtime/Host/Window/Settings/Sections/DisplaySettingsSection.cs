@@ -50,6 +50,17 @@ internal sealed class DisplaySettingsSection : ISettingsSection
         if (scale != Hle.GlVram.Scale)
             ImGui.TextDisabled(Localization.T("settings.display.restart_pending"));
 
+        var wideModes = Hle.Widescreen.Modes;
+        var wideIndex = Math.Max(Array.IndexOf(wideModes, Hle.Widescreen.Mode), 0);
+        if (ImGui.Combo(Localization.T("settings.display.widescreen"), ref wideIndex, wideModes, wideModes.Length))
+        {
+            ConfigManager.View.SetString(Hle.Widescreen.Key, wideModes[wideIndex]);
+            ConfigManager.SaveView(PanelManager.Panels);
+            Hle.Widescreen.Apply();
+        }
+
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(Localization.T("settings.display.widescreen_hint"));
+
         ImGui.Separator();
 
         var index = Array.IndexOf(Backends, ConfigManager.View.GpuBackend);

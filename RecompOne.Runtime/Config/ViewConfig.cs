@@ -85,7 +85,7 @@ public class ViewConfig
     
     public bool HideTopBar
     {
-        get => GetBool("HideTopBar");
+        get => GetBool("HideTopBar", true);
         set => SetBool("HideTopBar", value);
     }
     
